@@ -4,7 +4,7 @@ file_path = "/home/AD/wdecoster/inquiSTR_paper/1000G_cohort.tsv"
 # Load a TSV file into a DataFrame, containing URLs of 1000 Genomes cram files
 df = pd.read_csv(file_path, sep='\t', usecols=['sample', 'hg38_path', 'source'])
 df = df[df["source"] == "Gustafson"]
-reference = "/home/AD/wdecoster/database/GRCh38s.fa"
+reference = "/home/AD/wdecoster/database/GRCh38.fa"
 inquiSTR = "/home/AD/wdecoster/repositories/inquiSTR/target/x86_64-unknown-linux-musl/release/inquiSTR"
 
 # Benchmark parameters
@@ -21,7 +21,8 @@ rule all:
     input:
         "codis_relate.tsv",
         "codis_pca.html",
-        "benchmark_results.tsv"
+        "benchmark_results.tsv",
+        "benchmark_plot.html"
 
 rule create_codis_manifest:
     output:
@@ -72,9 +73,9 @@ rule codis_relate:
     shell:
         """
         {params.inquiSTR} relate \
-            --combined {input} \
             --output {output} \
             --threads {threads} \
+            {input} \
             > {log} 2>&1
         """
 
@@ -92,9 +93,9 @@ rule codis_pca:
     shell:
         """
         {params.inquiSTR} pca \
-            --combined {input} \
             --output {output} \
             --threads {threads} \
+            {input} \
             > {log} 2>&1
         """
 
@@ -111,6 +112,8 @@ rule benchmark_call:
         inquiSTR = inquiSTR,
         reference = reference
     threads: lambda wildcards: int(wildcards.threads)
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
     log:
         "logs/benchmark_{technology}_threads{threads}_rep{replicate}.log"
     shell:
@@ -147,8 +150,9 @@ rule aggregate_benchmark_results:
                 with open(timing_file, 'r') as f:
                     for line in f:
                         if 'Elapsed (wall clock) time' in line:
-                            # Format is "h:mm:ss.ss" or "m:ss.ss"
-                            time_str = line.split(':', 1)[1].strip()
+                            # Format is "Elapsed (wall clock) time (h:mm:ss or m:ss): 6:15.40"
+                            # Split at "): " to get the time value
+                            time_str = line.split('): ', 1)[1].strip()
                             # Convert to seconds
                             parts = time_str.split(':')
                             if len(parts) == 3:  # h:mm:ss
@@ -157,6 +161,8 @@ rule aggregate_benchmark_results:
                             elif len(parts) == 2:  # mm:ss
                                 m, s = parts
                                 elapsed_time = int(m) * 60 + float(s)
+                            elif len(parts) == 1:  # just ss
+                                elapsed_time = float(parts[0])
                             break
                 
                 if elapsed_time is not None:
@@ -172,3 +178,100 @@ rule aggregate_benchmark_results:
         df = pd.DataFrame(results)
         df = df.sort_values(['technology', 'threads', 'replicate'])
         df.to_csv(output[0], sep='\t', index=False)
+
+rule plot_benchmark_results:
+    input:
+        "benchmark_results.tsv"
+    output:
+        "benchmark_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        
+        # Read the data
+        df = pd.read_csv(input[0], sep='\t')
+        
+        # Convert seconds to minutes
+        df['elapsed_minutes'] = df['elapsed_seconds'] / 60
+        
+        # Calculate mean per technology and thread count
+        mean_df = df.groupby(['technology', 'threads'])['elapsed_minutes'].mean().reset_index()
+        
+        # Color mapping
+        colors = {
+            'pacbio': 'purple',
+            'ont': 'blue'
+        }
+        
+        # Create the plot
+        fig = go.Figure()
+        
+        # Add individual points and lines for each technology
+        for tech in df['technology'].unique():
+            tech_data = df[df['technology'] == tech]
+            tech_mean = mean_df[mean_df['technology'] == tech]
+            
+            # Add scatter points for individual measurements
+            fig.add_trace(go.Scatter(
+                x=tech_data['threads'],
+                y=tech_data['elapsed_minutes'],
+                mode='markers',
+                name=f'{tech} (replicates)',
+                marker=dict(
+                    color=colors[tech],
+                    size=8,
+                    opacity=0.5
+                ),
+                showlegend=False
+            ))
+            
+            # Add line for mean values
+            fig.add_trace(go.Scatter(
+                x=tech_mean['threads'],
+                y=tech_mean['elapsed_minutes'],
+                mode='lines+markers',
+                name=f'{tech}',
+                line=dict(
+                    color=colors[tech],
+                    width=3
+                ),
+                marker=dict(
+                    color=colors[tech],
+                    size=10
+                ),
+                showlegend=True
+            ))
+        
+        # Update layout
+        fig.update_layout(
+            title='Benchmark Results: Runtime vs Thread Count',
+            xaxis_title='Number of Threads',
+            yaxis_title='Elapsed Time (minutes)',
+            plot_bgcolor='white',
+            hovermode='closest',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="right",
+                x=0.99
+            )
+        )
+        
+        # Update axes
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor='lightgray',
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor='lightgray',
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        
+        # Save the plot
+        fig.write_html(output[0])
