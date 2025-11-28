@@ -4,6 +4,11 @@ file_path = "/home/AD/wdecoster/inquiSTR_paper/1000G_cohort.tsv"
 # Load a TSV file into a DataFrame, containing URLs of 1000 Genomes cram files
 df = pd.read_csv(file_path, sep='\t', usecols=['sample', 'hg38_path', 'source'])
 df = df[df["source"] == "Gustafson"]
+
+# get a list of 100 samples
+selected_samples = df[:100]
+
+
 reference = "/home/AD/wdecoster/database/GRCh38.fa"
 inquiSTR = "/home/AD/wdecoster/repositories/inquiSTR/target/x86_64-unknown-linux-musl/release/inquiSTR"
 
@@ -19,16 +24,35 @@ random.shuffle(THREAD_ORDER)
 
 rule all:
     input:
-        "codis_relate.tsv",
-        "codis_pca.html",
+        "polymorphic_repeats_relate.tsv",
+        "polymorphic_repeats_pca.html",
         "benchmark_results.tsv",
-        "benchmark_plot.html"
+        "benchmark_plot.html",
+        "adotto_combined_selected_samples.tsv",
+        "pacbio-trgt-adotto.vcf.gz",
+        "pacbio-trgt-adotto.time",
+        "pacbio-inquistr-adotto.inq.gz",
+        "pacbio-inquistr-adotto.time",
+        "adotto-variable-catalog.bed.gz",
+        "pacbio-trgt-adotto-filtered.vcf.gz",
+        "pacbio-trgt-adotto-filtered.time"
 
-rule create_codis_manifest:
+rule create_manifest_selected_samples:
     output:
-        manifest = "codis_manifest.tsv"
+        manifest = "selected_samples_manifest.tsv"
     log:
-        "logs/create_codis_manifest.log"
+        "logs/create_manifest.log"
+    run:
+        with open(output.manifest, 'w') as f:
+            f.write("bam_path\tsample_name\n")
+            for idx, row in selected_samples.iterrows():
+                f.write(f"{row['hg38_path']}\t{row['sample']}\n")
+
+rule create_polymorphic_manifest:
+    output:
+        manifest = "polymorphic_manifest.tsv"
+    log:
+        "logs/create_polymorphic_manifest.log"
     run:
         with open(output.manifest, 'w') as f:
             f.write("bam_path\tsample_name\n")
@@ -36,22 +60,23 @@ rule create_codis_manifest:
                 f.write(f"{row['hg38_path']}\t{row['sample']}\n")
 
 
-rule genotype_codis:
+rule genotype_polymorphic:
     input:
-        "codis_manifest.tsv"
+        manifest = "polymorphic_manifest.tsv",
+        bed = "polymorphic_repeats.hg38.bed"
     output:
-        "codis_combined.tsv"
+        "polymorphic_repeats_combined.tsv"
     params:
         reference = reference,
         inquiSTR = inquiSTR
     threads: 8
     log:
-        "logs/genotype_codis.log"
+        "logs/genotype_polymorphic.log"
     shell:
         """
-        {params.inquiSTR} batch {input} \
+        {params.inquiSTR} batch {input.manifest} \
             --output {output} \
-            --preset codis \
+            --region-file {input.bed} \
             --unphased \
             --threads {threads} \
             --reference {params.reference} \
@@ -60,16 +85,16 @@ rule genotype_codis:
         """
 
 
-rule codis_relate:
+rule polymorphic_relate:
     input:
-        "codis_combined.tsv"
+        "polymorphic_repeats_combined.tsv"
     output:
-        "codis_relate.tsv"
+        "polymorphic_repeats_relate.tsv"
     threads: 16
     params:
         inquiSTR = inquiSTR
     log:
-        "logs/codis_relate.log"
+        "logs/polymorphic_relate.log"
     shell:
         """
         {params.inquiSTR} relate \
@@ -80,22 +105,48 @@ rule codis_relate:
         """
 
 
-rule codis_pca:
+rule polymorphic_pca:
     input:
-        "codis_combined.tsv"
+        "polymorphic_repeats_combined.tsv"
     output:
-        "codis_pca.html"
+        "polymorphic_repeats_pca.html"
     threads: 16
     params:
         inquiSTR = inquiSTR
     log:
-        "logs/codis_pca.log"
+        "logs/polymorphic_pca.log"
     shell:
         """
         {params.inquiSTR} pca \
             --output {output} \
             --threads {threads} \
             {input} \
+            > {log} 2>&1
+        """
+
+
+rule genotype_adotto:
+    input:
+        "selected_samples_manifest.tsv"
+    output:
+        "adotto_combined_selected_samples.tsv"
+    params:
+        reference = reference,
+        inquiSTR = inquiSTR
+    threads: 16
+    log:
+        "logs/genotype_adotto.log"
+    shell:
+        """
+        {params.inquiSTR} batch {input} \
+            --output {output} \
+            --preset adotto \
+            --unphased \
+            --threads {threads} \
+            --parallel-samples 4 \
+            --reference {params.reference} \
+            --resume \
+            --save-individual adotto_individual \
             > {log} 2>&1
         """
 
@@ -275,3 +326,109 @@ rule plot_benchmark_results:
         
         # Save the plot
         fig.write_html(output[0])
+
+rule download_adotto:
+    output:
+        catalog = "adotto_TRGT.bed.gz",
+    log:
+        "logs/download_adotto.log"
+    params:
+        url = "https://zenodo.org/records/8329210/files/adotto_repeats.hg38.bed.gz",
+        chromosome = "chr1"
+    shell:
+        """
+        wget -O {output.catalog} {params.url} &> {log}
+        """
+
+rule TRGT_adotto:
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        pacbio = "pacbio.cram",
+    output:
+        vcf = "pacbio-trgt-adotto.vcf.gz",
+        timing = "pacbio-trgt-adotto.time"
+    log:
+        "logs/TRGT_adotto.log"
+    params:
+        TRGT = "/home/AD/wdecoster/bin/trgt",
+        reference = reference
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.TRGT} genotype --genome {params.reference} \
+            --repeats {input.catalog} \
+            --reads {input.pacbio} \
+            --threads {threads} \
+            --output-prefix pacbio-trgt-adotto &> {log}
+        """
+
+rule inquiSTR_adotto:
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        pacbio = "pacbio.cram",
+    output:
+        inq = "pacbio-inquistr-adotto.inq.gz",
+        timing = "pacbio-inquistr-adotto.time"
+    log:
+        "logs/inquiSTR_adotto.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference
+    threads:
+        4
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} call {input.pacbio} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --unphased | gzip > {output.inq} 2> {log}
+        """
+
+rule filter_inquiSTR_adotto:
+    input:
+        "pacbio-inquistr-adotto.inq.gz"
+    output:
+        "adotto-variable-catalog.bed.gz"
+    log:
+        "logs/filter_inquiSTR_adotto.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        {params.inquiSTR} filter {input} --minchange 20 | cut -f1-4 | gzip > {output} 2> {log}"""
+
+rule TRGT_adotto_filtered:
+    input:
+        catalog = "adotto-variable-catalog.bed.gz",
+        pacbio = "pacbio.cram",
+    output:
+        vcf = "pacbio-trgt-adotto-filtered.vcf.gz",
+        timing = "pacbio-trgt-adotto-filtered.time"
+    log:
+        "logs/TRGT_adotto_filtered.log"
+    params:
+        TRGT = "/home/AD/wdecoster/bin/trgt",
+        reference = reference
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.TRGT} genotype --genome {params.reference} \
+            --repeats {input.catalog} \
+            --reads {input.pacbio} \
+            --threads {threads} \
+            --output-prefix pacbio-trgt-adotto-filtered &> {log}
+        """
+
+# polymorphic repeats from illumina https://zenodo.org/records/8329210/files/polymorphic_repeats.hg38.bed?download=1
