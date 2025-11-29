@@ -81,6 +81,7 @@ rule genotype_polymorphic:
             --threads {threads} \
             --reference {params.reference} \
             --resume \
+            --keep-going \
             > {log} 2>&1
         """
 
