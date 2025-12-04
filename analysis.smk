@@ -69,7 +69,7 @@ rule genotype_polymorphic:
     params:
         reference = reference,
         inquiSTR = inquiSTR
-    threads: 8
+    threads: 4
     log:
         "logs/genotype_polymorphic.log"
     shell:
