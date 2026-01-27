@@ -24,18 +24,32 @@ random.shuffle(THREAD_ORDER)
 
 rule all:
     input:
-        "polymorphic_repeats_relate.tsv",
-        "polymorphic_repeats_pca.html",
-        "benchmark_results.tsv",
-        "benchmark_plot.html",
-        "adotto_combined_selected_samples.tsv",
-        "pacbio-trgt-adotto.vcf.gz",
-        "pacbio-trgt-adotto.time",
-        "pacbio-inquistr-adotto.inq.gz",
-        "pacbio-inquistr-adotto.time",
-        "adotto-variable-catalog.bed.gz",
-        "pacbio-trgt-adotto-filtered.vcf.gz",
-        "pacbio-trgt-adotto-filtered.time"
+        "benchmarking/results.tsv",
+        "benchmarking/runtime_plot.html",
+        "benchmarking/memory_plot.html",
+        "genotyping/adotto_combined_selected_samples.tsv",
+        expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.time", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        expand("tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz", replicate=REPLICATES),
+        expand("tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.vcf.gz", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        "tool_comparison/results.tsv",
+        "tool_comparison/runtime_plot.html",
+        "tool_comparison/memory_plot.html",
+        "tool_versions.txt"
+
+rule list_versions:
+    input:
+        "tool_versions.txt"
+
+# using polymorphic repeats from illumina https://zenodo.org/records/8329210/files/polymorphic_repeats.hg38.bed?download=1
+rule polymorphic:
+    input:
+        "polymorphic/repeats_relate.tsv",
+        "polymorphic/repeats_pca.html",
 
 rule create_manifest_selected_samples:
     output:
@@ -65,7 +79,7 @@ rule genotype_polymorphic:
         manifest = "polymorphic_manifest.tsv",
         bed = "polymorphic_repeats.hg38.bed"
     output:
-        "polymorphic_repeats_combined.tsv"
+        "polymorphic/repeats_combined.tsv"
     params:
         reference = reference,
         inquiSTR = inquiSTR
@@ -88,9 +102,9 @@ rule genotype_polymorphic:
 
 rule polymorphic_relate:
     input:
-        "polymorphic_repeats_combined.tsv"
+        "polymorphic/repeats_combined.tsv"
     output:
-        "polymorphic_repeats_relate.tsv"
+        "polymorphic/repeats_relate.tsv"
     threads: 16
     params:
         inquiSTR = inquiSTR
@@ -108,9 +122,9 @@ rule polymorphic_relate:
 
 rule polymorphic_pca:
     input:
-        "polymorphic_repeats_combined.tsv"
+        "polymorphic/repeats_combined.tsv"
     output:
-        "polymorphic_repeats_pca.html"
+        "polymorphic/repeats_pca.html"
     threads: 16
     params:
         inquiSTR = inquiSTR
@@ -130,7 +144,7 @@ rule genotype_adotto:
     input:
         "selected_samples_manifest.tsv"
     output:
-        "adotto_combined_selected_samples.tsv"
+        "genotyping/adotto_combined_selected_samples.tsv"
     params:
         reference = reference,
         inquiSTR = inquiSTR
@@ -147,7 +161,7 @@ rule genotype_adotto:
             --parallel-samples 4 \
             --reference {params.reference} \
             --resume \
-            --save-individual adotto_individual \
+            --save-individual genotyping/adotto_individual \
             > {log} 2>&1
         """
 
@@ -158,8 +172,8 @@ rule benchmark_call:
         cram = "{technology}.cram",
         bed = "adotto.bed.gz"
     output:
-        result = "benchmarks/{technology}_threads{threads}_rep{replicate}.tsv",
-        timing = "benchmarks/{technology}_threads{threads}_rep{replicate}.time"
+        result = "benchmarking/data/{technology}_threads{threads}_rep{replicate}.tsv",
+        timing = "benchmarking/data/{technology}_threads{threads}_rep{replicate}.time"
     params:
         inquiSTR = inquiSTR,
         reference = reference
@@ -181,24 +195,25 @@ rule benchmark_call:
 
 rule aggregate_benchmark_results:
     input:
-        expand("benchmarks/{technology}_threads{threads}_rep{replicate}.time",
+        expand("benchmarking/data/{technology}_threads{threads}_rep{replicate}.time",
                technology=TECHNOLOGIES,
                threads=THREAD_COUNTS,
                replicate=REPLICATES)
     output:
-        "benchmark_results.tsv"
+        "benchmarking/results.tsv"
     run:
         import re
         results = []
         
         for timing_file in input:
             # Parse filename to get metadata
-            match = re.search(r'benchmarks/(\w+)_threads(\d+)_rep(\d+)\.time', timing_file)
+            match = re.search(r'benchmarking/data/(\w+)_threads(\d+)_rep(\d+)\.time', timing_file)
             if match:
                 technology, threads, replicate = match.groups()
                 
                 # Parse timing output from /usr/bin/time -v
                 elapsed_time = None
+                max_memory_kb = None
                 with open(timing_file, 'r') as f:
                     for line in f:
                         if 'Elapsed (wall clock) time' in line:
@@ -215,14 +230,17 @@ rule aggregate_benchmark_results:
                                 elapsed_time = int(m) * 60 + float(s)
                             elif len(parts) == 1:  # just ss
                                 elapsed_time = float(parts[0])
-                            break
+                        elif 'Maximum resident set size' in line:
+                            # Format is "Maximum resident set size (kbytes): 123456"
+                            max_memory_kb = int(line.split(':')[1].strip())
                 
-                if elapsed_time is not None:
+                if elapsed_time is not None and max_memory_kb is not None:
                     results.append({
                         'technology': technology,
                         'threads': int(threads),
                         'replicate': int(replicate),
-                        'elapsed_seconds': elapsed_time
+                        'elapsed_seconds': elapsed_time,
+                        'max_memory_gb': max_memory_kb / (1024 * 1024)  # Convert KB to GB
                     })
         
         # Write results
@@ -233,9 +251,9 @@ rule aggregate_benchmark_results:
 
 rule plot_benchmark_results:
     input:
-        "benchmark_results.tsv"
+        "benchmarking/results.tsv"
     output:
-        "benchmark_plot.html"
+        "benchmarking/runtime_plot.html"
     run:
         import pandas as pd
         import plotly.graph_objects as go
@@ -328,14 +346,107 @@ rule plot_benchmark_results:
         # Save the plot
         fig.write_html(output[0])
 
+rule plot_memory_usage:
+    input:
+        "benchmarking/results.tsv"
+    output:
+        "benchmarking/memory_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        
+        # Read the data
+        df = pd.read_csv(input[0], sep='\t')
+        
+        # Calculate mean per technology and thread count
+        mean_df = df.groupby(['technology', 'threads'])['max_memory_gb'].mean().reset_index()
+        
+        # Color mapping
+        colors = {
+            'pacbio': 'purple',
+            'ont': 'blue'
+        }
+        
+        # Create the plot
+        fig = go.Figure()
+        
+        # Add individual points and lines for each technology
+        for tech in df['technology'].unique():
+            tech_data = df[df['technology'] == tech]
+            tech_mean = mean_df[mean_df['technology'] == tech]
+            
+            # Add scatter points for individual measurements
+            fig.add_trace(go.Scatter(
+                x=tech_data['threads'],
+                y=tech_data['max_memory_gb'],
+                mode='markers',
+                name=f'{tech} (replicates)',
+                marker=dict(
+                    color=colors[tech],
+                    size=8,
+                    opacity=0.5
+                ),
+                showlegend=False
+            ))
+            
+            # Add line for mean values
+            fig.add_trace(go.Scatter(
+                x=tech_mean['threads'],
+                y=tech_mean['max_memory_gb'],
+                mode='lines+markers',
+                name=f'{tech}',
+                line=dict(
+                    color=colors[tech],
+                    width=3
+                ),
+                marker=dict(
+                    color=colors[tech],
+                    size=10
+                ),
+                showlegend=True
+            ))
+        
+        # Update layout
+        fig.update_layout(
+            title='Benchmark Results: Memory Usage vs Thread Count',
+            xaxis_title='Number of Threads',
+            yaxis_title='Maximum Memory Usage (GB)',
+            plot_bgcolor='white',
+            hovermode='closest',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="right",
+                x=0.99
+            )
+        )
+        
+        # Update axes
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor='lightgray',
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor='lightgray',
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        
+        # Save the plot
+        fig.write_html(output[0])
+
 rule download_adotto:
     output:
         catalog = "adotto_TRGT.bed.gz",
     log:
         "logs/download_adotto.log"
     params:
-        url = "https://zenodo.org/records/8329210/files/adotto_repeats.hg38.bed.gz",
-        chromosome = "chr1"
+        url = "https://zenodo.org/records/13987414/files/adotto_TRregions_v1.2.1.bed.gz",
     shell:
         """
         wget -O {output.catalog} {params.url} &> {log}
@@ -346,10 +457,10 @@ rule TRGT_adotto:
         catalog = "adotto_TRGT.bed.gz",
         pacbio = "pacbio.cram",
     output:
-        vcf = "pacbio-trgt-adotto.vcf.gz",
-        timing = "pacbio-trgt-adotto.time"
+        vcf = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz",
+        timing = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.time"
     log:
-        "logs/TRGT_adotto.log"
+        "logs/TRGT_adotto_rep{replicate}.log"
     params:
         TRGT = "/home/AD/wdecoster/bin/trgt",
         reference = reference
@@ -364,7 +475,7 @@ rule TRGT_adotto:
             --repeats {input.catalog} \
             --reads {input.pacbio} \
             --threads {threads} \
-            --output-prefix pacbio-trgt-adotto &> {log}
+            --output-prefix tool_comparison/pacbio-trgt-adotto_rep{wildcards.replicate} &> {log}
         """
 
 rule inquiSTR_adotto:
@@ -372,10 +483,10 @@ rule inquiSTR_adotto:
         catalog = "adotto_TRGT.bed.gz",
         pacbio = "pacbio.cram",
     output:
-        inq = "pacbio-inquistr-adotto.inq.gz",
-        timing = "pacbio-inquistr-adotto.time"
+        inq = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
+        timing = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time"
     log:
-        "logs/inquiSTR_adotto.log"
+        "logs/inquiSTR_adotto_rep{replicate}.log"
     params:
         inquiSTR = inquiSTR,
         reference = reference
@@ -395,26 +506,28 @@ rule inquiSTR_adotto:
 
 rule filter_inquiSTR_adotto:
     input:
-        "pacbio-inquistr-adotto.inq.gz"
+        "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz"
     output:
-        "adotto-variable-catalog.bed.gz"
+        catalog = "tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz",
+        timing = "tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time"
     log:
-        "logs/filter_inquiSTR_adotto.log"
+        "logs/filter_inquiSTR_adotto_rep{replicate}.log"
     params:
         inquiSTR = inquiSTR
     shell:
         """
-        {params.inquiSTR} filter {input} --minchange 20 | cut -f1-4 | gzip > {output} 2> {log}"""
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} filter {input} --minchange 20 | cut -f1-4 | gzip > {output.catalog} 2> {log}"""
 
 rule TRGT_adotto_filtered:
     input:
-        catalog = "adotto-variable-catalog.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz",
         pacbio = "pacbio.cram",
     output:
-        vcf = "pacbio-trgt-adotto-filtered.vcf.gz",
-        timing = "pacbio-trgt-adotto-filtered.time"
+        vcf = "tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.vcf.gz",
+        timing = "tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time"
     log:
-        "logs/TRGT_adotto_filtered.log"
+        "logs/TRGT_adotto_filtered_rep{replicate}.log"
     params:
         TRGT = "/home/AD/wdecoster/bin/trgt",
         reference = reference
@@ -429,7 +542,294 @@ rule TRGT_adotto_filtered:
             --repeats {input.catalog} \
             --reads {input.pacbio} \
             --threads {threads} \
-            --output-prefix pacbio-trgt-adotto-filtered &> {log}
+            --output-prefix tool_comparison/pacbio-trgt-adotto-filtered_rep{wildcards.replicate} &> {log}
         """
 
-# polymorphic repeats from illumina https://zenodo.org/records/8329210/files/polymorphic_repeats.hg38.bed?download=1
+rule aggregate_tool_comparison:
+    input:
+        inquistr_time = expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        trgt_time = expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.time", replicate=REPLICATES),
+        filter_time = expand("tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time", replicate=REPLICATES),
+        trgt_filtered_time = expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES)
+    output:
+        "tool_comparison/results.tsv"
+    run:
+        import re
+        import pandas as pd
+        
+        def parse_timing_file(filepath):
+            """Parse /usr/bin/time -v output file."""
+            elapsed_time = None
+            max_memory_kb = None
+            with open(filepath, 'r') as f:
+                for line in f:
+                    if 'Elapsed (wall clock) time' in line:
+                        time_str = line.split('): ', 1)[1].strip()
+                        parts = time_str.split(':')
+                        if len(parts) == 3:  # h:mm:ss
+                            h, m, s = parts
+                            elapsed_time = int(h) * 3600 + int(m) * 60 + float(s)
+                        elif len(parts) == 2:  # mm:ss
+                            m, s = parts
+                            elapsed_time = int(m) * 60 + float(s)
+                        elif len(parts) == 1:  # just ss
+                            elapsed_time = float(parts[0])
+                    elif 'Maximum resident set size' in line:
+                        max_memory_kb = int(line.split(':')[1].strip())
+            return elapsed_time, max_memory_kb
+        
+        results = []
+        
+        # Parse inquiSTR timing for each replicate
+        for filepath in input.inquistr_time:
+            match = re.search(r'rep(\d+)', filepath)
+            replicate = int(match.group(1)) if match else None
+            elapsed, memory = parse_timing_file(filepath)
+            if elapsed and memory and replicate:
+                results.append({
+                    'tool': 'inquiSTR',
+                    'replicate': replicate,
+                    'elapsed_seconds': elapsed,
+                    'max_memory_gb': memory / (1024 * 1024)
+                })
+        
+        # Parse TRGT timing for each replicate
+        for filepath in input.trgt_time:
+            match = re.search(r'rep(\d+)', filepath)
+            replicate = int(match.group(1)) if match else None
+            elapsed, memory = parse_timing_file(filepath)
+            if elapsed and memory and replicate:
+                results.append({
+                    'tool': 'TRGT',
+                    'replicate': replicate,
+                    'elapsed_seconds': elapsed,
+                    'max_memory_gb': memory / (1024 * 1024)
+                })
+        
+        # Parse inquiSTR + filter + TRGT filtered timing (sum of all three) for each replicate
+        for i, (inq_file, filt_file, trgt_file) in enumerate(zip(input.inquistr_time, input.filter_time, input.trgt_filtered_time)):
+            match = re.search(r'rep(\d+)', inq_file)
+            replicate = int(match.group(1)) if match else None
+            
+            inq_elapsed, inq_memory = parse_timing_file(inq_file)
+            filt_elapsed, filt_memory = parse_timing_file(filt_file)
+            trgt_filt_elapsed, trgt_filt_memory = parse_timing_file(trgt_file)
+            
+            if all([inq_elapsed, filt_elapsed, trgt_filt_elapsed, replicate]):
+                total_elapsed = inq_elapsed + filt_elapsed + trgt_filt_elapsed
+                # For memory, use the maximum of the three steps
+                max_memory = max(inq_memory, filt_memory, trgt_filt_memory)
+                results.append({
+                    'tool': 'inquiSTR+TRGT',
+                    'replicate': replicate,
+                    'elapsed_seconds': total_elapsed,
+                    'max_memory_gb': max_memory / (1024 * 1024)
+                })
+        
+        # Write results
+        df = pd.DataFrame(results)
+        df = df.sort_values(['tool', 'replicate'])
+        df.to_csv(output[0], sep='\t', index=False)
+        
+        if all([inq_elapsed, filt_elapsed, trgt_filt_elapsed]):
+            total_elapsed = inq_elapsed + filt_elapsed + trgt_filt_elapsed
+            # For memory, use the maximum of the three steps
+            max_memory = max(inq_memory, filt_memory, trgt_filt_memory)
+            results.append({
+                'tool': 'inquiSTR+TRGT',
+                'elapsed_seconds': total_elapsed,
+                'max_memory_gb': max_memory / (1024 * 1024)
+            })
+        
+        # Write results
+        df = pd.DataFrame(results)
+        df.to_csv(output[0], sep='\t', index=False)
+
+rule plot_tool_comparison_time:
+    input:
+        "tool_comparison/results.tsv"
+    output:
+        "tool_comparison/runtime_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        
+        # Read the data
+        df = pd.read_csv(input[0], sep='\t')
+        
+        # Convert seconds to minutes
+        df['elapsed_minutes'] = df['elapsed_seconds'] / 60
+        
+        # Calculate mean per tool
+        mean_df = df.groupby('tool')['elapsed_minutes'].mean().reset_index()
+        mean_df = mean_df.sort_values('tool')  # Ensure consistent ordering
+        
+        # Color mapping
+        colors = {
+            'inquiSTR': '#1f77b4',
+            'TRGT': '#ff7f0e',
+            'inquiSTR+TRGT': '#2ca02c'
+        }
+        
+        # Create bar plot with individual points
+        fig = go.Figure()
+        
+        # Add individual replicate points as scatter
+        for tool in df['tool'].unique():
+            tool_data = df[df['tool'] == tool]
+            fig.add_trace(go.Scatter(
+                x=[tool] * len(tool_data),
+                y=tool_data['elapsed_minutes'],
+                mode='markers',
+                name=f'{tool} (replicates)',
+                marker=dict(
+                    color=colors[tool],
+                    size=10,
+                    opacity=0.6,
+                    line=dict(width=1, color='white')
+                ),
+                showlegend=False
+            ))
+        
+        # Add mean bars
+        fig.add_trace(go.Bar(
+            x=mean_df['tool'],
+            y=mean_df['elapsed_minutes'],
+            marker_color=[colors[tool] for tool in mean_df['tool']],
+            text=[f"{val:.2f} min" for val in mean_df['elapsed_minutes']],
+            textposition='outside',
+            name='Mean',
+            opacity=0.7
+        ))
+        
+        # Update layout
+        fig.update_layout(
+            title='Tool Comparison: Runtime (mean with individual replicates)',
+            xaxis_title='Tool',
+            yaxis_title='Elapsed Time (minutes)',
+            plot_bgcolor='white',
+            showlegend=False
+        )
+        
+        # Update axes
+        fig.update_xaxes(
+            showgrid=False,
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor='lightgray',
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        
+        # Save the plot
+        fig.write_html(output[0])
+
+rule plot_tool_comparison_memory:
+    input:
+        "tool_comparison/results.tsv"
+    output:
+        "tool_comparison/memory_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        
+        # Read the data
+        df = pd.read_csv(input[0], sep='\t')
+        
+        # Calculate mean per tool
+        mean_df = df.groupby('tool')['max_memory_gb'].mean().reset_index()
+        mean_df = mean_df.sort_values('tool')  # Ensure consistent ordering
+        
+        # Color mapping
+        colors = {
+            'inquiSTR': '#1f77b4',
+            'TRGT': '#ff7f0e',
+            'inquiSTR+TRGT': '#2ca02c'
+        }
+        
+        # Create bar plot with individual points
+        fig = go.Figure()
+        
+        # Add individual replicate points as scatter
+        for tool in df['tool'].unique():
+            tool_data = df[df['tool'] == tool]
+            fig.add_trace(go.Scatter(
+                x=[tool] * len(tool_data),
+                y=tool_data['max_memory_gb'],
+                mode='markers',
+                name=f'{tool} (replicates)',
+                marker=dict(
+                    color=colors[tool],
+                    size=10,
+                    opacity=0.6,
+                    line=dict(width=1, color='white')
+                ),
+                showlegend=False
+            ))
+        
+        # Add mean bars
+        fig.add_trace(go.Bar(
+            x=mean_df['tool'],
+            y=mean_df['max_memory_gb'],
+            marker_color=[colors[tool] for tool in mean_df['tool']],
+            text=[f"{val:.2f} GB" for val in mean_df['max_memory_gb']],
+            textposition='outside',
+            name='Mean',
+            opacity=0.7
+        ))
+        
+        # Update layout
+        fig.update_layout(
+            title='Tool Comparison: Memory Usage (mean with individual replicates)',
+            xaxis_title='Tool',
+            yaxis_title='Maximum Memory Usage (GB)',
+            plot_bgcolor='white',
+            showlegend=False
+        )
+        
+        # Update axes
+        fig.update_xaxes(
+            showgrid=False,
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor='lightgray',
+            showline=True,
+            linewidth=2,
+            linecolor='black'
+        )
+        
+        # Save the plot
+        fig.write_html(output[0])
+
+rule capture_tool_versions:
+    output:
+        "tool_versions.txt"
+    params:
+        inquiSTR = inquiSTR,
+        TRGT = "/home/AD/wdecoster/bin/trgt"
+    log:
+        "logs/capture_tool_versions.log"
+    shell:
+        """
+        {{
+            echo "Tool Versions Summary"
+            echo "====================="
+            echo ""
+            echo "inquiSTR:"
+            {params.inquiSTR} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "TRGT:"
+            {params.TRGT} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "Generated on: $(date)"
+        }} > {output} 2> {log}
+        """
