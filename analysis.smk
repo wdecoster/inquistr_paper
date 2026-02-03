@@ -26,6 +26,11 @@ import random
 THREAD_ORDER = THREAD_COUNTS * len(REPLICATES)
 random.shuffle(THREAD_ORDER)
 
+# if the "tool_versions.txt" file exists, remove it to ensure fresh capture of tool versions
+import os
+if os.path.exists("tool_versions.txt"):
+    os.remove("tool_versions.txt")
+
 rule all:
     input:
         "benchmarking/results.tsv",
@@ -44,11 +49,25 @@ rule all:
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
         "tool_comparison/memory_plot.html",
-        "tool_versions.txt"
+        "tool_versions.txt",
+        "inquiSTR_version.txt"
 
 rule versions:
     input:
         "tool_versions.txt"
+
+rule inquiSTR_version:
+    """Capture inquiSTR version to trigger reruns when version changes"""
+    output:
+        "inquiSTR_version.txt"
+    params:
+        inquiSTR = inquiSTR
+    log:
+        "logs/inquiSTR_version.log"
+    shell:
+        """
+        {params.inquiSTR} --version > {output} 2>&1
+        """
 
 # using polymorphic repeats from illumina https://zenodo.org/records/8329210/files/polymorphic_repeats.hg38.bed?download=1
 rule polymorphic:
@@ -82,7 +101,8 @@ rule create_polymorphic_manifest:
 rule genotype_polymorphic:
     input:
         manifest = "polymorphic_manifest.tsv",
-        bed = "polymorphic_repeats.hg38.bed"
+        bed = "polymorphic_repeats.hg38.bed",
+        version = "inquiSTR_version.txt"
     output:
         "polymorphic/repeats_combined.tsv"
     params:
@@ -109,7 +129,8 @@ rule genotype_polymorphic:
 
 rule polymorphic_relate:
     input:
-        "polymorphic/repeats_combined.tsv"
+        "polymorphic/repeats_combined.tsv",
+        version = "inquiSTR_version.txt"
     output:
         "polymorphic/repeats_relate.tsv"
     threads: 16
@@ -129,7 +150,8 @@ rule polymorphic_relate:
 
 rule polymorphic_pca:
     input:
-        "polymorphic/repeats_combined.tsv"
+        "polymorphic/repeats_combined.tsv",
+        version = "inquiSTR_version.txt"
     output:
         "polymorphic/repeats_pca.html"
     threads: 16
@@ -150,7 +172,8 @@ rule polymorphic_pca:
 rule genotype_adotto:
     input:
         manifest = "selected_samples_manifest.tsv",
-        bed = "adotto.bed.gz"
+        bed = "adotto.bed.gz",
+        version = "inquiSTR_version.txt"
     output:
         "genotyping/adotto_combined_selected_samples.tsv"
     params:
@@ -180,7 +203,8 @@ rule genotype_adotto:
 rule benchmark_call:
     input:
         cram = "{technology}.cram", # for ont, this refers to the `ont_downsampled.cram` file
-        bed = "adotto.bed.gz"
+        bed = "adotto.bed.gz",
+        version = "inquiSTR_version.txt"
     output:
         result = "benchmarking/data/{technology}_threads{threads}_rep{replicate}.tsv",
         timing = "benchmarking/data/{technology}_threads{threads}_rep{replicate}.time"
@@ -205,13 +229,70 @@ rule benchmark_call:
         """
 
 
+rule aggregate_benchmark_results:
+    input:
+        expand("benchmarking/data/{technology}_threads{threads}_rep{replicate}.time",
+               technology=TECHNOLOGIES,
+               threads=THREAD_COUNTS,
+               replicate=REPLICATES)
+    output:
+        "benchmarking/results.tsv"
+    run:
+        import re
+        results = []
+        
+        for timing_file in input:
+            # Parse filename to get metadata
+            match = re.search(r'benchmarking/data/(\w+)_threads(\d+)_rep(\d+)\.time', timing_file)
+            if match:
+                technology, threads, replicate = match.groups()
+                
+                # Parse timing output from /usr/bin/time -v
+                elapsed_time = None
+                max_memory_kb = None
+                with open(timing_file, 'r') as f:
+                    for line in f:
+                        if 'Elapsed (wall clock) time' in line:
+                            # Format is "Elapsed (wall clock) time (h:mm:ss or m:ss): 6:15.40"
+                            # Split at "): " to get the time value
+                            time_str = line.split('): ', 1)[1].strip()
+                            # Convert to seconds
+                            parts = time_str.split(':')
+                            if len(parts) == 3:  # h:mm:ss
+                                h, m, s = parts
+                                elapsed_time = int(h) * 3600 + int(m) * 60 + float(s)
+                            elif len(parts) == 2:  # mm:ss
+                                m, s = parts
+                                elapsed_time = int(m) * 60 + float(s)
+                            elif len(parts) == 1:  # just ss
+                                elapsed_time = float(parts[0])
+                        elif 'Maximum resident set size' in line:
+                            # Format is "Maximum resident set size (kbytes): 123456"
+                            max_memory_kb = int(line.split(':')[1].strip())
+                
+                if elapsed_time is not None and max_memory_kb is not None:
+                    results.append({
+                        'technology': technology,
+                        'threads': int(threads),
+                        'replicate': int(replicate),
+                        'elapsed_seconds': elapsed_time,
+                        'max_memory_gb': max_memory_kb / (1024 * 1024)  # Convert KB to GB
+                    })
+        
+        # Write results
+        import pandas as pd
+        df = pd.DataFrame(results)
+        df = df.sort_values(['technology', 'threads', 'replicate'])
+        df.to_csv(output[0], sep='\t', index=False)
+
+
 rule download_adotto:
     output:
         catalog = "adotto_TRGT.bed.gz",
     log:
         "logs/download_adotto.log"
     params:
-        url = "https://zenodo.org/records/13987414/files/adotto_TRregions_v1.2.1.bed.gz",
+        url = "https://zenodo.org/records/8329210/files/adotto_repeats.hg38.bed.gz",
     shell:
         """
         wget -O {output.catalog} {params.url} &> {log}
@@ -247,6 +328,7 @@ rule inquiSTR_adotto:
     input:
         catalog = "adotto_TRGT.bed.gz",
         pacbio = "pacbio.cram",
+        version = "inquiSTR_version.txt"
     output:
         inq = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
         timing = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time"
@@ -268,12 +350,13 @@ rule inquiSTR_adotto:
             --threads {threads} \
             --reference {params.reference} \
             --max-locus {params.max_locus} \
-            --unphased | gzip > {output.inq} 2> {log}
+            --unphased 2> {log} | gzip > {output.inq} 2> {log}
         """
 
 rule filter_inquiSTR_adotto:
     input:
-        "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz"
+        "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
+        version = "inquiSTR_version.txt"
     output:
         catalog = "tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz",
         timing = "tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time"
@@ -444,9 +527,11 @@ rule inquiSTR_accuracy:
     """
     input:
         truth_bed = "/home/AD/wdecoster/optimize_inquiSTR/adotto/HG002_GRCh38_TandemRepeats_v1.0.bed.gz",
-        genotypes = "benchmarking/data/{technology}_threads4_rep1.tsv"
+        genotypes = "benchmarking/data/{technology}_threads4_rep1.tsv",
+        version = "inquiSTR_version.txt"
     output:
-        "benchmarking/accuracy_{technology}.tsv"
+        txt = "benchmarking/accuracy_{technology}.tsv",
+        plot = "benchmarking/accuracy_{technology}.html"
     params:
         inquiSTR = inquiSTR,
         tolerance = 3,
@@ -459,8 +544,9 @@ rule inquiSTR_accuracy:
             --bed {input.truth_bed} \
             --mode MAX \
             --tier1 \
+            --plot {output.plot} \
             --tolerance {params.tolerance} \
             --max-locus {params.max_locus} \
             {input.genotypes} \
-            > {output} 2> {log}
+            > {output.txt} 2> {log}
         """
