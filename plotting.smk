@@ -2,62 +2,6 @@
 Plotting rules for inquiSTR paper analysis
 """
 
-rule aggregate_benchmark_results:
-    input:
-        expand("benchmarking/data/{technology}_threads{threads}_rep{replicate}.time",
-               technology=TECHNOLOGIES,
-               threads=THREAD_COUNTS,
-               replicate=REPLICATES)
-    output:
-        "benchmarking/results.tsv"
-    run:
-        import re
-        results = []
-        
-        for timing_file in input:
-            # Parse filename to get metadata
-            match = re.search(r'benchmarking/data/(\w+)_threads(\d+)_rep(\d+)\.time', timing_file)
-            if match:
-                technology, threads, replicate = match.groups()
-                
-                # Parse timing output from /usr/bin/time -v
-                elapsed_time = None
-                max_memory_kb = None
-                with open(timing_file, 'r') as f:
-                    for line in f:
-                        if 'Elapsed (wall clock) time' in line:
-                            # Format is "Elapsed (wall clock) time (h:mm:ss or m:ss): 6:15.40"
-                            # Split at "): " to get the time value
-                            time_str = line.split('): ', 1)[1].strip()
-                            # Convert to seconds
-                            parts = time_str.split(':')
-                            if len(parts) == 3:  # h:mm:ss
-                                h, m, s = parts
-                                elapsed_time = int(h) * 3600 + int(m) * 60 + float(s)
-                            elif len(parts) == 2:  # mm:ss
-                                m, s = parts
-                                elapsed_time = int(m) * 60 + float(s)
-                            elif len(parts) == 1:  # just ss
-                                elapsed_time = float(parts[0])
-                        elif 'Maximum resident set size' in line:
-                            # Format is "Maximum resident set size (kbytes): 123456"
-                            max_memory_kb = int(line.split(':')[1].strip())
-                
-                if elapsed_time is not None and max_memory_kb is not None:
-                    results.append({
-                        'technology': technology,
-                        'threads': int(threads),
-                        'replicate': int(replicate),
-                        'elapsed_seconds': elapsed_time,
-                        'max_memory_gb': max_memory_kb / (1024 * 1024)  # Convert KB to GB
-                    })
-        
-        # Write results
-        import pandas as pd
-        df = pd.DataFrame(results)
-        df = df.sort_values(['technology', 'threads', 'replicate'])
-        df.to_csv(output[0], sep='\t', index=False)
-
 rule plot_benchmark_results:
     input:
         "benchmarking/results.tsv"
