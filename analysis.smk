@@ -18,7 +18,7 @@ inquiSTR = "/home/AD/wdecoster/repositories/inquiSTR/target/x86_64-unknown-linux
 # Benchmark parameters
 TECHNOLOGIES = ["ont", "pacbio"]
 THREAD_COUNTS = list(range(1, 13))  # 1 to 12 threads
-REPLICATES = [1, 2, 3]
+REPLICATES = list(range(1,6))  # 5 replicates
 MAX_LOCUS = 10000  # limit to loci shorter than 10kb for genotyping
 
 # Randomize order of thread counts for benchmarking
@@ -350,12 +350,12 @@ rule inquiSTR_adotto:
             --threads {threads} \
             --reference {params.reference} \
             --max-locus {params.max_locus} \
-            --unphased 2> {log} | gzip > {output.inq} 2> {log}
+            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
         """
 
 rule filter_inquiSTR_adotto:
     input:
-        "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
+        pacbio_inq = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
         version = "inquiSTR_version.txt"
     output:
         catalog = "tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz",
@@ -367,7 +367,7 @@ rule filter_inquiSTR_adotto:
     shell:
         """
         /usr/bin/time -v -o {output.timing} \
-        {params.inquiSTR} filter {input} --minchange 20 | cut -f1-4 | gzip > {output.catalog} 2> {log}"""
+        {params.inquiSTR} filter {input.pacbio_inq} --minchange 20 2> {log} | cut -f1-4 | gzip > {output.catalog} 2>> {log}"""
 
 rule TRGT_adotto_filtered:
     input:
