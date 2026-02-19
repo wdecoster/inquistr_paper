@@ -58,6 +58,8 @@ rule versions:
 
 rule inquiSTR_version:
     """Capture inquiSTR version to trigger reruns when version changes"""
+    input:
+        inquiSTR
     output:
         "inquiSTR_version.txt"
     params:
