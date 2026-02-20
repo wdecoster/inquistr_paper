@@ -201,80 +201,68 @@ rule plot_tool_comparison_time:
     run:
         import pandas as pd
         import plotly.graph_objects as go
-        
+
         # Read the data
         df = pd.read_csv(input[0], sep='\t')
-        
+
         # Convert seconds to minutes
         df['elapsed_minutes'] = df['elapsed_seconds'] / 60
-        
-        # Calculate mean per tool
-        mean_df = df.groupby('tool')['elapsed_minutes'].mean().reset_index()
-        mean_df = mean_df.sort_values('tool')  # Ensure consistent ordering
-        
-        # Color mapping
-        colors = {
-            'inquiSTR': '#1f77b4',
-            'TRGT': '#ff7f0e',
-            'inquiSTR+TRGT': '#2ca02c'
+
+        # Define a fixed x-axis order for tools
+        tool_order = ['inquiSTR', 'TRGT', 'LongTR', 'inquiSTR+TRGT', 'inquiSTR+LongTR']
+
+        # Color and display name per technology
+        tech_config = {
+            'pacbio': {'color': 'purple', 'label': 'PacBio'},
+            'ont':    {'color': 'steelblue', 'label': 'ONT'},
         }
-        
-        # Create bar plot with individual points
+
         fig = go.Figure()
-        
-        # Add individual replicate points as scatter
-        for tool in df['tool'].unique():
-            tool_data = df[df['tool'] == tool]
-            fig.add_trace(go.Scatter(
-                x=[tool] * len(tool_data),
-                y=tool_data['elapsed_minutes'],
-                mode='markers',
-                name=f'{tool} (replicates)',
-                marker=dict(
-                    color=colors[tool],
-                    size=10,
-                    opacity=0.6,
-                    line=dict(width=1, color='white')
-                ),
-                showlegend=False
+
+        for tech, cfg in tech_config.items():
+            tech_df = df[df['technology'] == tech]
+            mean_df = tech_df.groupby('tool')['elapsed_minutes'].mean().reset_index()
+
+            # Bars for mean values
+            fig.add_trace(go.Bar(
+                x=mean_df['tool'],
+                y=mean_df['elapsed_minutes'],
+                name=cfg['label'],
+                marker_color=cfg['color'],
+                opacity=0.7,
+                text=[f"{v:.2f} min" for v in mean_df['elapsed_minutes']],
+                textposition='outside',
             ))
-        
-        # Add mean bars
-        fig.add_trace(go.Bar(
-            x=mean_df['tool'],
-            y=mean_df['elapsed_minutes'],
-            marker_color=[colors[tool] for tool in mean_df['tool']],
-            text=[f"{val:.2f} min" for val in mean_df['elapsed_minutes']],
-            textposition='outside',
-            name='Mean',
-            opacity=0.7
-        ))
-        
-        # Update layout
+
+            # Scatter points for individual replicates
+            for tool in tech_df['tool'].unique():
+                tool_data = tech_df[tech_df['tool'] == tool]
+                fig.add_trace(go.Scatter(
+                    x=[tool] * len(tool_data),
+                    y=tool_data['elapsed_minutes'],
+                    mode='markers',
+                    name=f'{cfg["label"]} replicates',
+                    marker=dict(color=cfg['color'], size=8, opacity=0.6,
+                                line=dict(width=1, color='white')),
+                    showlegend=False,
+                ))
+
         fig.update_layout(
             title='Tool Comparison: Runtime (mean with individual replicates)',
             xaxis_title='Tool',
             yaxis_title='Elapsed Time (minutes)',
+            barmode='group',
             plot_bgcolor='white',
-            showlegend=False
+            xaxis=dict(
+                categoryorder='array',
+                categoryarray=tool_order,
+            ),
+            legend=dict(yanchor='top', y=0.99, xanchor='right', x=0.99),
         )
-        
-        # Update axes
-        fig.update_xaxes(
-            showgrid=False,
-            showline=True,
-            linewidth=2,
-            linecolor='black'
-        )
-        fig.update_yaxes(
-            showgrid=True,
-            gridcolor='lightgray',
-            showline=True,
-            linewidth=2,
-            linecolor='black'
-        )
-        
-        # Save the plot
+        fig.update_xaxes(showgrid=False, showline=True, linewidth=2, linecolor='black')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray', showline=True,
+                         linewidth=2, linecolor='black')
+
         fig.write_html(output[0])
 
 rule plot_tool_comparison_memory:
@@ -285,75 +273,63 @@ rule plot_tool_comparison_memory:
     run:
         import pandas as pd
         import plotly.graph_objects as go
-        
+
         # Read the data
         df = pd.read_csv(input[0], sep='\t')
-        
-        # Calculate mean per tool
-        mean_df = df.groupby('tool')['max_memory_gb'].mean().reset_index()
-        mean_df = mean_df.sort_values('tool')  # Ensure consistent ordering
-        
-        # Color mapping
-        colors = {
-            'inquiSTR': '#1f77b4',
-            'TRGT': '#ff7f0e',
-            'inquiSTR+TRGT': '#2ca02c'
+
+        # Define a fixed x-axis order for tools
+        tool_order = ['inquiSTR', 'TRGT', 'LongTR', 'inquiSTR+TRGT', 'inquiSTR+LongTR']
+
+        # Color and display name per technology
+        tech_config = {
+            'pacbio': {'color': 'purple', 'label': 'PacBio'},
+            'ont':    {'color': 'steelblue', 'label': 'ONT'},
         }
-        
-        # Create bar plot with individual points
+
         fig = go.Figure()
-        
-        # Add individual replicate points as scatter
-        for tool in df['tool'].unique():
-            tool_data = df[df['tool'] == tool]
-            fig.add_trace(go.Scatter(
-                x=[tool] * len(tool_data),
-                y=tool_data['max_memory_gb'],
-                mode='markers',
-                name=f'{tool} (replicates)',
-                marker=dict(
-                    color=colors[tool],
-                    size=10,
-                    opacity=0.6,
-                    line=dict(width=1, color='white')
-                ),
-                showlegend=False
+
+        for tech, cfg in tech_config.items():
+            tech_df = df[df['technology'] == tech]
+            mean_df = tech_df.groupby('tool')['max_memory_gb'].mean().reset_index()
+
+            # Bars for mean values
+            fig.add_trace(go.Bar(
+                x=mean_df['tool'],
+                y=mean_df['max_memory_gb'],
+                name=cfg['label'],
+                marker_color=cfg['color'],
+                opacity=0.7,
+                text=[f"{v:.2f} GB" for v in mean_df['max_memory_gb']],
+                textposition='outside',
             ))
-        
-        # Add mean bars
-        fig.add_trace(go.Bar(
-            x=mean_df['tool'],
-            y=mean_df['max_memory_gb'],
-            marker_color=[colors[tool] for tool in mean_df['tool']],
-            text=[f"{val:.2f} GB" for val in mean_df['max_memory_gb']],
-            textposition='outside',
-            name='Mean',
-            opacity=0.7
-        ))
-        
-        # Update layout
+
+            # Scatter points for individual replicates
+            for tool in tech_df['tool'].unique():
+                tool_data = tech_df[tech_df['tool'] == tool]
+                fig.add_trace(go.Scatter(
+                    x=[tool] * len(tool_data),
+                    y=tool_data['max_memory_gb'],
+                    mode='markers',
+                    name=f'{cfg["label"]} replicates',
+                    marker=dict(color=cfg['color'], size=8, opacity=0.6,
+                                line=dict(width=1, color='white')),
+                    showlegend=False,
+                ))
+
         fig.update_layout(
             title='Tool Comparison: Memory Usage (mean with individual replicates)',
             xaxis_title='Tool',
             yaxis_title='Maximum Memory Usage (GB)',
+            barmode='group',
             plot_bgcolor='white',
-            showlegend=False
+            xaxis=dict(
+                categoryorder='array',
+                categoryarray=tool_order,
+            ),
+            legend=dict(yanchor='top', y=0.99, xanchor='right', x=0.99),
         )
-        
-        # Update axes
-        fig.update_xaxes(
-            showgrid=False,
-            showline=True,
-            linewidth=2,
-            linecolor='black'
-        )
-        fig.update_yaxes(
-            showgrid=True,
-            gridcolor='lightgray',
-            showline=True,
-            linewidth=2,
-            linecolor='black'
-        )
-        
-        # Save the plot
+        fig.update_xaxes(showgrid=False, showline=True, linewidth=2, linecolor='black')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray', showline=True,
+                         linewidth=2, linecolor='black')
+
         fig.write_html(output[0])

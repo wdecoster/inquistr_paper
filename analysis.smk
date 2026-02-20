@@ -14,6 +14,8 @@ selected_samples = df[:100]
 
 reference = "/home/AD/wdecoster/database/GRCh38.fa"
 inquiSTR = "/home/AD/wdecoster/repositories/inquiSTR/target/x86_64-unknown-linux-musl/release/inquiSTR"
+TRGT = "/home/AD/wdecoster/bin/trgt",
+LongTR = "/home/AD/wdecoster/anaconda3/envs/longtr/bin/LongTR"
 
 # Benchmark parameters
 TECHNOLOGIES = ["ont", "pacbio"]
@@ -37,14 +39,36 @@ rule all:
         "benchmarking/runtime_plot.html",
         "benchmarking/memory_plot.html",
         #"genotyping/adotto_combined_selected_samples.tsv",
+        # PacBio TRGT
         expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz", replicate=REPLICATES),
         expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.time", replicate=REPLICATES),
+        # PacBio inquiSTR
         expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz", replicate=REPLICATES),
         expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
-        expand("tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz", replicate=REPLICATES),
-        expand("tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time", replicate=REPLICATES),
+        # PacBio inquiSTR filter catalog
+        expand("tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz", replicate=REPLICATES),
+        expand("tool_comparison/filter-inquistr-pacbio_rep{replicate}.time", replicate=REPLICATES),
+        # PacBio TRGT filtered
         expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.vcf.gz", replicate=REPLICATES),
         expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        # PacBio LongTR
+        expand("tool_comparison/pacbio-longtr-adotto_rep{replicate}.vcf.gz", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-longtr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        # PacBio LongTR filtered
+        expand("tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.vcf.gz", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        # ONT inquiSTR
+        expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.inq.gz", replicate=REPLICATES),
+        expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        # ONT inquiSTR filter catalog
+        expand("tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed.gz", replicate=REPLICATES),
+        expand("tool_comparison/filter-inquistr-ont_rep{replicate}.time", replicate=REPLICATES),
+        # ONT LongTR
+        expand("tool_comparison/ont-longtr-adotto_rep{replicate}.vcf.gz", replicate=REPLICATES),
+        expand("tool_comparison/ont-longtr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        # ONT LongTR filtered
+        expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.vcf.gz", replicate=REPLICATES),
+        expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
         expand("benchmarking/accuracy_{technology}.tsv", technology=TECHNOLOGIES),
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
@@ -355,15 +379,15 @@ rule inquiSTR_adotto:
             --unphased 2> {log} | gzip > {output.inq} 2>> {log}
         """
 
-rule filter_inquiSTR_adotto:
+rule filter_inquiSTR_pacbio:
     input:
         pacbio_inq = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
         version = "inquiSTR_version.txt"
     output:
-        catalog = "tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz",
-        timing = "tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time"
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz",
+        timing = "tool_comparison/filter-inquistr-pacbio_rep{replicate}.time"
     log:
-        "logs/filter_inquiSTR_adotto_rep{replicate}.log"
+        "logs/filter_inquistr_pacbio_rep{replicate}.log"
     params:
         inquiSTR = inquiSTR
     shell:
@@ -373,7 +397,7 @@ rule filter_inquiSTR_adotto:
 
 rule TRGT_adotto_filtered:
     input:
-        catalog = "tool_comparison/adotto-variable-catalog_rep{replicate}.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz",
         pacbio = "pacbio.cram",
     output:
         vcf = "tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.vcf.gz",
@@ -397,18 +421,180 @@ rule TRGT_adotto_filtered:
             --output-prefix tool_comparison/pacbio-trgt-adotto-filtered_rep{wildcards.replicate} &> {log}
         """
 
+rule LongTR_pacbio:
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        pacbio = "pacbio.cram",
+    output:
+        vcf = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.vcf.gz",
+        timing = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.time"
+    log:
+        "logs/LongTR_pacbio_rep{replicate}.log"
+    params:
+        LongTR = LongTR,
+        reference = reference
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.LongTR} \
+            --bams {input.pacbio} \
+            --fasta {params.reference} \
+            --regions {input.catalog} \
+            --tr-vcf {output.vcf} \
+            --num-threads {threads} &> {log}
+        """
+
+rule LongTR_pacbio_filtered:
+    input:
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz",
+        pacbio = "pacbio.cram",
+    output:
+        vcf = "tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.vcf.gz",
+        timing = "tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.time"
+    log:
+        "logs/LongTR_pacbio_filtered_rep{replicate}.log"
+    params:
+        LongTR = LongTR,
+        reference = reference
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.LongTR} \
+            --bams {input.pacbio} \
+            --fasta {params.reference} \
+            --regions {input.catalog} \
+            --tr-vcf {output.vcf} \
+            --num-threads {threads} &> {log}
+        """
+
+rule inquiSTR_ont:
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        ont = "ont.cram",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/ont-inquistr-adotto_rep{replicate}.inq.gz",
+        timing = "tool_comparison/ont-inquistr-adotto_rep{replicate}.time"
+    log:
+        "logs/inquiSTR_ont_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    threads:
+        4
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} call {input.ont} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+rule filter_inquiSTR_ont:
+    input:
+        ont_inq = "tool_comparison/ont-inquistr-adotto_rep{replicate}.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        catalog = "tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed.gz",
+        timing = "tool_comparison/filter-inquistr-ont_rep{replicate}.time"
+    log:
+        "logs/filter_inquistr_ont_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} filter {input.ont_inq} --minchange 20 2> {log} | cut -f1-4 | gzip > {output.catalog} 2>> {log}
+        """
+
+rule LongTR_ont:
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        ont = "ont.cram",
+    output:
+        vcf = "tool_comparison/ont-longtr-adotto_rep{replicate}.vcf.gz",
+        timing = "tool_comparison/ont-longtr-adotto_rep{replicate}.time"
+    log:
+        "logs/LongTR_ont_rep{replicate}.log"
+    params:
+        LongTR = LongTR,
+        reference = reference
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.LongTR} \
+            --bams {input.ont} \
+            --fasta {params.reference} \
+            --regions {input.catalog} \
+            --tr-vcf {output.vcf} \
+            --num-threads {threads} &> {log}
+        """
+
+rule LongTR_ont_filtered:
+    input:
+        catalog = "tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed.gz",
+        ont = "ont.cram",
+    output:
+        vcf = "tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.vcf.gz",
+        timing = "tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.time"
+    log:
+        "logs/LongTR_ont_filtered_rep{replicate}.log"
+    params:
+        LongTR = LongTR,
+        reference = reference
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.LongTR} \
+            --bams {input.ont} \
+            --fasta {params.reference} \
+            --regions {input.catalog} \
+            --tr-vcf {output.vcf} \
+            --num-threads {threads} &> {log}
+        """
+
 rule aggregate_tool_comparison:
     input:
-        inquistr_time = expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
-        trgt_time = expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.time", replicate=REPLICATES),
-        filter_time = expand("tool_comparison/filter-inquiSTR-adotto_rep{replicate}.time", replicate=REPLICATES),
-        trgt_filtered_time = expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES)
+        # PacBio timing files
+        pacbio_inquistr_time = expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_trgt_time = expand("tool_comparison/pacbio-trgt-adotto_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_longtr_time = expand("tool_comparison/pacbio-longtr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_filter_time = expand("tool_comparison/filter-inquistr-pacbio_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_trgt_filtered_time = expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_longtr_filtered_time = expand("tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        # ONT timing files
+        ont_inquistr_time = expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        ont_longtr_time = expand("tool_comparison/ont-longtr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        ont_filter_time = expand("tool_comparison/filter-inquistr-ont_rep{replicate}.time", replicate=REPLICATES),
+        ont_longtr_filtered_time = expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES)
     output:
         "tool_comparison/results.tsv"
     run:
         import re
         import pandas as pd
-        
+
         def parse_timing_file(filepath):
             """Parse /usr/bin/time -v output file."""
             elapsed_time = None
@@ -429,72 +615,70 @@ rule aggregate_tool_comparison:
                     elif 'Maximum resident set size' in line:
                         max_memory_kb = int(line.split(':')[1].strip())
             return elapsed_time, max_memory_kb
-        
+
+        def get_replicate(filepath):
+            match = re.search(r'rep(\d+)', filepath)
+            return int(match.group(1)) if match else None
+
+        def add_single_tool(file_list, tool, technology, results):
+            """Parse individual tool timing files and append to results."""
+            for filepath in file_list:
+                replicate = get_replicate(filepath)
+                elapsed, memory = parse_timing_file(filepath)
+                if elapsed and memory and replicate:
+                    results.append({
+                        'tool': tool,
+                        'technology': technology,
+                        'replicate': replicate,
+                        'elapsed_seconds': elapsed,
+                        'max_memory_gb': memory / (1024 * 1024)
+                    })
+
+        def add_combined_tool(inq_files, filter_files, tool_files, tool_label, technology, results):
+            """Sum timing across three steps (inquiSTR + filter + tool) and append to results."""
+            for inq_file, filt_file, tool_file in zip(inq_files, filter_files, tool_files):
+                replicate = get_replicate(inq_file)
+                inq_elapsed, inq_memory = parse_timing_file(inq_file)
+                filt_elapsed, filt_memory = parse_timing_file(filt_file)
+                tool_elapsed, tool_memory = parse_timing_file(tool_file)
+                if all([inq_elapsed, filt_elapsed, tool_elapsed, replicate]):
+                    results.append({
+                        'tool': tool_label,
+                        'technology': technology,
+                        'replicate': replicate,
+                        'elapsed_seconds': inq_elapsed + filt_elapsed + tool_elapsed,
+                        'max_memory_gb': max(inq_memory, filt_memory, tool_memory) / (1024 * 1024)
+                    })
+
         results = []
-        
-        # Parse inquiSTR timing for each replicate
-        for filepath in input.inquistr_time:
-            match = re.search(r'rep(\d+)', filepath)
-            replicate = int(match.group(1)) if match else None
-            elapsed, memory = parse_timing_file(filepath)
-            if elapsed and memory and replicate:
-                results.append({
-                    'tool': 'inquiSTR',
-                    'replicate': replicate,
-                    'elapsed_seconds': elapsed,
-                    'max_memory_gb': memory / (1024 * 1024)
-                })
-        
-        # Parse TRGT timing for each replicate
-        for filepath in input.trgt_time:
-            match = re.search(r'rep(\d+)', filepath)
-            replicate = int(match.group(1)) if match else None
-            elapsed, memory = parse_timing_file(filepath)
-            if elapsed and memory and replicate:
-                results.append({
-                    'tool': 'TRGT',
-                    'replicate': replicate,
-                    'elapsed_seconds': elapsed,
-                    'max_memory_gb': memory / (1024 * 1024)
-                })
-        
-        # Parse inquiSTR + filter + TRGT filtered timing (sum of all three) for each replicate
-        for i, (inq_file, filt_file, trgt_file) in enumerate(zip(input.inquistr_time, input.filter_time, input.trgt_filtered_time)):
-            match = re.search(r'rep(\d+)', inq_file)
-            replicate = int(match.group(1)) if match else None
-            
-            inq_elapsed, inq_memory = parse_timing_file(inq_file)
-            filt_elapsed, filt_memory = parse_timing_file(filt_file)
-            trgt_filt_elapsed, trgt_filt_memory = parse_timing_file(trgt_file)
-            
-            if all([inq_elapsed, filt_elapsed, trgt_filt_elapsed, replicate]):
-                total_elapsed = inq_elapsed + filt_elapsed + trgt_filt_elapsed
-                # For memory, use the maximum of the three steps
-                max_memory = max(inq_memory, filt_memory, trgt_filt_memory)
-                results.append({
-                    'tool': 'inquiSTR+TRGT',
-                    'replicate': replicate,
-                    'elapsed_seconds': total_elapsed,
-                    'max_memory_gb': max_memory / (1024 * 1024)
-                })
-        
-        # Write results
+
+        # PacBio single tools
+        add_single_tool(input.pacbio_inquistr_time, 'inquiSTR', 'pacbio', results)
+        add_single_tool(input.pacbio_trgt_time, 'TRGT', 'pacbio', results)
+        add_single_tool(input.pacbio_longtr_time, 'LongTR', 'pacbio', results)
+
+        # PacBio combined pipelines
+        add_combined_tool(
+            input.pacbio_inquistr_time, input.pacbio_filter_time, input.pacbio_trgt_filtered_time,
+            'inquiSTR+TRGT', 'pacbio', results
+        )
+        add_combined_tool(
+            input.pacbio_inquistr_time, input.pacbio_filter_time, input.pacbio_longtr_filtered_time,
+            'inquiSTR+LongTR', 'pacbio', results
+        )
+
+        # ONT single tools
+        add_single_tool(input.ont_inquistr_time, 'inquiSTR', 'ont', results)
+        add_single_tool(input.ont_longtr_time, 'LongTR', 'ont', results)
+
+        # ONT combined pipeline
+        add_combined_tool(
+            input.ont_inquistr_time, input.ont_filter_time, input.ont_longtr_filtered_time,
+            'inquiSTR+LongTR', 'ont', results
+        )
+
         df = pd.DataFrame(results)
-        df = df.sort_values(['tool', 'replicate'])
-        df.to_csv(output[0], sep='\t', index=False)
-        
-        if all([inq_elapsed, filt_elapsed, trgt_filt_elapsed]):
-            total_elapsed = inq_elapsed + filt_elapsed + trgt_filt_elapsed
-            # For memory, use the maximum of the three steps
-            max_memory = max(inq_memory, filt_memory, trgt_filt_memory)
-            results.append({
-                'tool': 'inquiSTR+TRGT',
-                'elapsed_seconds': total_elapsed,
-                'max_memory_gb': max_memory / (1024 * 1024)
-            })
-        
-        # Write results
-        df = pd.DataFrame(results)
+        df = df.sort_values(['technology', 'tool', 'replicate'])
         df.to_csv(output[0], sep='\t', index=False)
 
 rule capture_tool_versions:
@@ -502,7 +686,8 @@ rule capture_tool_versions:
         "tool_versions.txt"
     params:
         inquiSTR = inquiSTR,
-        TRGT = "/home/AD/wdecoster/bin/trgt"
+        TRGT = TRGT,
+        LongTR = LongTR
     log:
         "logs/capture_tool_versions.log"
     shell:
@@ -516,6 +701,9 @@ rule capture_tool_versions:
             echo ""
             echo "TRGT:"
             {params.TRGT} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "LongTR:"
+            {params.LongTR} --version 2>&1 || echo "Version command not available"
             echo ""
             echo "Generated on: $(date)"
         }} > {output} 2> {log}
