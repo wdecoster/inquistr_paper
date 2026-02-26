@@ -208,54 +208,71 @@ rule plot_tool_comparison_time:
         # Convert seconds to minutes
         df['elapsed_minutes'] = df['elapsed_seconds'] / 60
 
-        # Define a fixed x-axis order for tools
-        tool_order = ['inquiSTR', 'TRGT', 'LongTR', 'inquiSTR+TRGT', 'inquiSTR+LongTR']
+        # Define ordering
+        tool_order = ['inquiSTR', 'TRGT', 'inquiSTR+TRGT', 'LongTR', 'inquiSTR+LongTR']
+        tech_order = ['pacbio', 'ont']
+        tech_labels = {'pacbio': 'PacBio', 'ont': 'ONT'}
 
-        # Color and display name per technology
-        tech_config = {
-            'pacbio': {'color': 'purple', 'label': 'PacBio'},
-            'ont':    {'color': 'steelblue', 'label': 'ONT'},
+        # One color per tool
+        tool_colors = {
+            'inquiSTR':       '#1f77b4',
+            'TRGT':           '#ff7f0e',
+            'inquiSTR+TRGT':  '#d62728',
+            'LongTR':         '#2ca02c',
+            'inquiSTR+LongTR':'#9467bd',
         }
 
+        group_width = 0.8
+        tool_seen = set()
         fig = go.Figure()
 
-        for tech, cfg in tech_config.items():
+        for tech_i, tech in enumerate(tech_order):
             tech_df = df[df['technology'] == tech]
-            mean_df = tech_df.groupby('tool')['elapsed_minutes'].mean().reset_index()
+            present_tools = [t for t in tool_order if t in tech_df['tool'].values]
+            n = len(present_tools)
+            bw = group_width / n
 
-            # Bars for mean values
-            fig.add_trace(go.Bar(
-                x=mean_df['tool'],
-                y=mean_df['elapsed_minutes'],
-                name=cfg['label'],
-                marker_color=cfg['color'],
-                opacity=0.7,
-                text=[f"{v:.2f} min" for v in mean_df['elapsed_minutes']],
-                textposition='outside',
-            ))
+            for j, tool in enumerate(present_tools):
+                offset = (j - (n - 1) / 2) * bw
+                x = tech_i + offset
+                color = tool_colors[tool]
+                tool_df = tech_df[tech_df['tool'] == tool]
+                mean_val = tool_df['elapsed_minutes'].mean()
 
-            # Scatter points for individual replicates
-            for tool in tech_df['tool'].unique():
-                tool_data = tech_df[tech_df['tool'] == tool]
+                fig.add_trace(go.Bar(
+                    x=[x],
+                    y=[mean_val],
+                    name=tool,
+                    marker_color=color,
+                    opacity=0.8,
+                    width=bw * 0.9,
+                    text=[f"{mean_val:.2f} min"],
+                    textposition='outside',
+                    legendgroup=tool,
+                    showlegend=(tool not in tool_seen),
+                ))
+                tool_seen.add(tool)
+
                 fig.add_trace(go.Scatter(
-                    x=[tool] * len(tool_data),
-                    y=tool_data['elapsed_minutes'],
+                    x=[x] * len(tool_df),
+                    y=tool_df['elapsed_minutes'],
                     mode='markers',
-                    name=f'{cfg["label"]} replicates',
-                    marker=dict(color=cfg['color'], size=8, opacity=0.6,
+                    marker=dict(color=color, size=7, opacity=0.6,
                                 line=dict(width=1, color='white')),
+                    legendgroup=tool,
                     showlegend=False,
                 ))
 
         fig.update_layout(
             title='Tool Comparison: Runtime (mean with individual replicates)',
-            xaxis_title='Tool',
+            xaxis_title='Technology',
             yaxis_title='Elapsed Time (minutes)',
-            barmode='group',
+            barmode='overlay',
             plot_bgcolor='white',
             xaxis=dict(
-                categoryorder='array',
-                categoryarray=tool_order,
+                tickmode='array',
+                tickvals=list(range(len(tech_order))),
+                ticktext=[tech_labels[t] for t in tech_order],
             ),
             legend=dict(yanchor='top', y=0.99, xanchor='right', x=0.99),
         )
@@ -277,54 +294,71 @@ rule plot_tool_comparison_memory:
         # Read the data
         df = pd.read_csv(input[0], sep='\t')
 
-        # Define a fixed x-axis order for tools
-        tool_order = ['inquiSTR', 'TRGT', 'LongTR', 'inquiSTR+TRGT', 'inquiSTR+LongTR']
+        # Define ordering
+        tool_order = ['inquiSTR', 'TRGT', 'inquiSTR+TRGT', 'LongTR', 'inquiSTR+LongTR']
+        tech_order = ['pacbio', 'ont']
+        tech_labels = {'pacbio': 'PacBio', 'ont': 'ONT'}
 
-        # Color and display name per technology
-        tech_config = {
-            'pacbio': {'color': 'purple', 'label': 'PacBio'},
-            'ont':    {'color': 'steelblue', 'label': 'ONT'},
+        # One color per tool
+        tool_colors = {
+            'inquiSTR':       '#1f77b4',
+            'TRGT':           '#ff7f0e',
+            'inquiSTR+TRGT':  '#d62728',
+            'LongTR':         '#2ca02c',
+            'inquiSTR+LongTR':'#9467bd',
         }
 
+        group_width = 0.8
+        tool_seen = set()
         fig = go.Figure()
 
-        for tech, cfg in tech_config.items():
+        for tech_i, tech in enumerate(tech_order):
             tech_df = df[df['technology'] == tech]
-            mean_df = tech_df.groupby('tool')['max_memory_gb'].mean().reset_index()
+            present_tools = [t for t in tool_order if t in tech_df['tool'].values]
+            n = len(present_tools)
+            bw = group_width / n
 
-            # Bars for mean values
-            fig.add_trace(go.Bar(
-                x=mean_df['tool'],
-                y=mean_df['max_memory_gb'],
-                name=cfg['label'],
-                marker_color=cfg['color'],
-                opacity=0.7,
-                text=[f"{v:.2f} GB" for v in mean_df['max_memory_gb']],
-                textposition='outside',
-            ))
+            for j, tool in enumerate(present_tools):
+                offset = (j - (n - 1) / 2) * bw
+                x = tech_i + offset
+                color = tool_colors[tool]
+                tool_df = tech_df[tech_df['tool'] == tool]
+                mean_val = tool_df['max_memory_gb'].mean()
 
-            # Scatter points for individual replicates
-            for tool in tech_df['tool'].unique():
-                tool_data = tech_df[tech_df['tool'] == tool]
+                fig.add_trace(go.Bar(
+                    x=[x],
+                    y=[mean_val],
+                    name=tool,
+                    marker_color=color,
+                    opacity=0.8,
+                    width=bw * 0.9,
+                    text=[f"{mean_val:.2f} GB"],
+                    textposition='outside',
+                    legendgroup=tool,
+                    showlegend=(tool not in tool_seen),
+                ))
+                tool_seen.add(tool)
+
                 fig.add_trace(go.Scatter(
-                    x=[tool] * len(tool_data),
-                    y=tool_data['max_memory_gb'],
+                    x=[x] * len(tool_df),
+                    y=tool_df['max_memory_gb'],
                     mode='markers',
-                    name=f'{cfg["label"]} replicates',
-                    marker=dict(color=cfg['color'], size=8, opacity=0.6,
+                    marker=dict(color=color, size=7, opacity=0.6,
                                 line=dict(width=1, color='white')),
+                    legendgroup=tool,
                     showlegend=False,
                 ))
 
         fig.update_layout(
             title='Tool Comparison: Memory Usage (mean with individual replicates)',
-            xaxis_title='Tool',
+            xaxis_title='Technology',
             yaxis_title='Maximum Memory Usage (GB)',
-            barmode='group',
+            barmode='overlay',
             plot_bgcolor='white',
             xaxis=dict(
-                categoryorder='array',
-                categoryarray=tool_order,
+                tickmode='array',
+                tickvals=list(range(len(tech_order))),
+                ticktext=[tech_labels[t] for t in tech_order],
             ),
             legend=dict(yanchor='top', y=0.99, xanchor='right', x=0.99),
         )

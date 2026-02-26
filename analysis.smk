@@ -45,9 +45,14 @@ rule all:
         # PacBio inquiSTR
         expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz", replicate=REPLICATES),
         expand("tool_comparison/pacbio-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
-        # PacBio inquiSTR filter catalog
-        expand("tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz", replicate=REPLICATES),
+        # PacBio inquiSTR filter catalog (TRGT format)
+        expand("tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed", replicate=REPLICATES),
         expand("tool_comparison/filter-inquistr-pacbio_rep{replicate}.time", replicate=REPLICATES),
+        # PacBio inquiSTR + filter catalog (LongTR format)
+        expand("tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.inq.gz", replicate=REPLICATES),
+        expand("tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.time", replicate=REPLICATES),
+        expand("tool_comparison/adotto-variable-catalog-pacbio-longtr_rep{replicate}.bed", replicate=REPLICATES),
+        expand("tool_comparison/filter-inquistr-pacbio-longtr_rep{replicate}.time", replicate=REPLICATES),
         # PacBio TRGT filtered
         expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.vcf.gz", replicate=REPLICATES),
         expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
@@ -60,15 +65,34 @@ rule all:
         # ONT inquiSTR
         expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.inq.gz", replicate=REPLICATES),
         expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
-        # ONT inquiSTR filter catalog
-        expand("tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed.gz", replicate=REPLICATES),
+        # ONT inquiSTR filter catalog (TRGT format, unused by LongTR)
+        expand("tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed", replicate=REPLICATES),
         expand("tool_comparison/filter-inquistr-ont_rep{replicate}.time", replicate=REPLICATES),
+        # ONT inquiSTR + filter catalog (LongTR format)
+        expand("tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.inq.gz", replicate=REPLICATES),
+        expand("tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.time", replicate=REPLICATES),
+        expand("tool_comparison/adotto-variable-catalog-ont-longtr_rep{replicate}.bed", replicate=REPLICATES),
+        expand("tool_comparison/filter-inquistr-ont-longtr_rep{replicate}.time", replicate=REPLICATES),
         # ONT LongTR
         expand("tool_comparison/ont-longtr-adotto_rep{replicate}.vcf.gz", replicate=REPLICATES),
         expand("tool_comparison/ont-longtr-adotto_rep{replicate}.time", replicate=REPLICATES),
         # ONT LongTR filtered
         expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.vcf.gz", replicate=REPLICATES),
         expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        # inquiSTR convert (rep1 only - representative conversion)
+        "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
+        "tool_comparison/pacbio-longtr-adotto_rep1.inq.gz",
+        "tool_comparison/ont-longtr-adotto_rep1.inq.gz",
+        # inquiSTR benchmark: compare inquiSTR genotypes against TRGT/LongTR genotypes
+        "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
+        "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.html",
+        "tool_comparison/benchmark_inquistr_vs_trgt_pacbio_discrepancies.tsv",
+        "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
+        "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.html",
+        "tool_comparison/benchmark_inquistr_vs_longtr_pacbio_discrepancies.tsv",
+        "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
+        "tool_comparison/benchmark_inquistr_vs_longtr_ont.html",
+        "tool_comparison/benchmark_inquistr_vs_longtr_ont_discrepancies.tsv",
         expand("benchmarking/accuracy_{technology}.tsv", technology=TECHNOLOGIES),
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
@@ -93,6 +117,34 @@ rule inquiSTR_version:
     shell:
         """
         {params.inquiSTR} --version > {output} 2>&1
+        """
+
+rule capture_tool_versions:
+    output:
+        "tool_versions.txt"
+    params:
+        inquiSTR = inquiSTR,
+        TRGT = TRGT,
+        LongTR = LongTR
+    log:
+        "logs/capture_tool_versions.log"
+    shell:
+        """
+        {{
+            echo "Tool Versions Summary"
+            echo "====================="
+            echo ""
+            echo "inquiSTR:"
+            {params.inquiSTR} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "TRGT:"
+            {params.TRGT} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "LongTR:"
+            {params.LongTR} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "Generated on: $(date)"
+        }} > {output} 2> {log}
         """
 
 # using polymorphic repeats from illumina https://zenodo.org/records/8329210/files/polymorphic_repeats.hg38.bed?download=1
@@ -324,6 +376,14 @@ rule download_adotto:
         wget -O {output.catalog} {params.url} &> {log}
         """
 
+rule decompress_catalog:
+    input:
+        catalog = "adotto_TRGT.bed.gz"
+    output:
+        catalog = "adotto_LongTR.bed"
+    shell:
+        "zcat {input.catalog} | awk 'BEGIN{{OFS=\"\\t\"}} {{match($4, /MOTIFS=([^;]+)/, m); $4=m[1]; print}}' > {output.catalog}"
+
 rule TRGT_adotto:
     input:
         catalog = "adotto_TRGT.bed.gz",
@@ -384,7 +444,7 @@ rule filter_inquiSTR_pacbio:
         pacbio_inq = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
         version = "inquiSTR_version.txt"
     output:
-        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed",
         timing = "tool_comparison/filter-inquistr-pacbio_rep{replicate}.time"
     log:
         "logs/filter_inquistr_pacbio_rep{replicate}.log"
@@ -393,11 +453,62 @@ rule filter_inquiSTR_pacbio:
     shell:
         """
         /usr/bin/time -v -o {output.timing} \
-        {params.inquiSTR} filter {input.pacbio_inq} --minchange 20 2> {log} | cut -f1-4 | gzip > {output.catalog} 2>> {log}"""
+        {params.inquiSTR} filter {input.pacbio_inq} --minchange 20 2> {log} | cut -f1-4 | grep -v '^#' > {output.catalog} 2>> {log}"""
+
+rule inquiSTR_adotto_longtr:
+    """Run inquiSTR call on PacBio using the LongTR-format catalog, so the filtered
+    output catalog has LongTR-compatible 4th-field motifs."""
+    input:
+        catalog = "adotto_LongTR.bed",
+        pacbio = "pacbio.cram",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.inq.gz",
+        timing = "tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.time"
+    log:
+        "logs/inquiSTR_adotto_longtr_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    threads:
+        4
+    resources:
+        benchmark_slot=1
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \\
+        {params.inquiSTR} call {input.pacbio} \\
+            --region-file {input.catalog} \\
+            --threads {threads} \\
+            --reference {params.reference} \\
+            --max-locus {params.max_locus} \\
+            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+
+rule filter_inquiSTR_pacbio_longtr:
+    """Filter the LongTR-catalog inquiSTR PacBio calls to variable loci,
+    producing a LongTR-compatible catalog (motif-only 4th field)."""
+    input:
+        pacbio_inq = "tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio-longtr_rep{replicate}.bed",
+        timing = "tool_comparison/filter-inquistr-pacbio-longtr_rep{replicate}.time"
+    log:
+        "logs/filter_inquistr_pacbio_longtr_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \\
+        {params.inquiSTR} filter {input.pacbio_inq} --minchange 20 2> {log} | cut -f1-4 | grep -v '^#' | grep -v '^chromosome' > {output.catalog} 2>> {log}"""
+
 
 rule TRGT_adotto_filtered:
     input:
-        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed",
         pacbio = "pacbio.cram",
     output:
         vcf = "tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.vcf.gz",
@@ -423,7 +534,7 @@ rule TRGT_adotto_filtered:
 
 rule LongTR_pacbio:
     input:
-        catalog = "adotto_TRGT.bed.gz",
+        catalog = "adotto_LongTR.bed",
         pacbio = "pacbio.cram",
     output:
         vcf = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.vcf.gz",
@@ -444,13 +555,12 @@ rule LongTR_pacbio:
             --bams {input.pacbio} \
             --fasta {params.reference} \
             --regions {input.catalog} \
-            --tr-vcf {output.vcf} \
-            --num-threads {threads} &> {log}
+            --tr-vcf {output.vcf} &> {log}
         """
 
 rule LongTR_pacbio_filtered:
     input:
-        catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog-pacbio-longtr_rep{replicate}.bed",
         pacbio = "pacbio.cram",
     output:
         vcf = "tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.vcf.gz",
@@ -471,8 +581,7 @@ rule LongTR_pacbio_filtered:
             --bams {input.pacbio} \
             --fasta {params.reference} \
             --regions {input.catalog} \
-            --tr-vcf {output.vcf} \
-            --num-threads {threads} &> {log}
+            --tr-vcf {output.vcf} &> {log}
         """
 
 rule inquiSTR_ont:
@@ -509,7 +618,7 @@ rule filter_inquiSTR_ont:
         ont_inq = "tool_comparison/ont-inquistr-adotto_rep{replicate}.inq.gz",
         version = "inquiSTR_version.txt"
     output:
-        catalog = "tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed",
         timing = "tool_comparison/filter-inquistr-ont_rep{replicate}.time"
     log:
         "logs/filter_inquistr_ont_rep{replicate}.log"
@@ -518,12 +627,63 @@ rule filter_inquiSTR_ont:
     shell:
         """
         /usr/bin/time -v -o {output.timing} \
-        {params.inquiSTR} filter {input.ont_inq} --minchange 20 2> {log} | cut -f1-4 | gzip > {output.catalog} 2>> {log}
+        {params.inquiSTR} filter {input.ont_inq} --minchange 20 2> {log} | cut -f1-4 > {output.catalog} 2>> {log}
+        """
+
+rule inquiSTR_ont_longtr:
+    """Run inquiSTR call on ONT using the LongTR-format catalog, so the filtered
+    output catalog has LongTR-compatible 4th-field motifs."""
+    input:
+        catalog = "adotto_LongTR.bed",
+        ont = "ont.cram",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.inq.gz",
+        timing = "tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.time"
+    log:
+        "logs/inquiSTR_ont_longtr_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    threads:
+        4
+    resources:
+        benchmark_slot=1
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \\
+        {params.inquiSTR} call {input.ont} \\
+            --region-file {input.catalog} \\
+            --threads {threads} \\
+            --reference {params.reference} \\
+            --max-locus {params.max_locus} \\
+            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+
+rule filter_inquiSTR_ont_longtr:
+    """Filter the LongTR-catalog inquiSTR ONT calls to variable loci,
+    producing a LongTR-compatible catalog (motif-only 4th field)."""
+    input:
+        ont_inq = "tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        catalog = "tool_comparison/adotto-variable-catalog-ont-longtr_rep{replicate}.bed",
+        timing = "tool_comparison/filter-inquistr-ont-longtr_rep{replicate}.time"
+    log:
+        "logs/filter_inquistr_ont_longtr_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \\
+        {params.inquiSTR} filter {input.ont_inq} --minchange 20 2> {log} | cut -f1-4 | grep -v '^#' | grep -v '^chromosome' > {output.catalog} 2>> {log}
         """
 
 rule LongTR_ont:
     input:
-        catalog = "adotto_TRGT.bed.gz",
+        catalog = "adotto_LongTR.bed",
         ont = "ont.cram",
     output:
         vcf = "tool_comparison/ont-longtr-adotto_rep{replicate}.vcf.gz",
@@ -544,13 +704,12 @@ rule LongTR_ont:
             --bams {input.ont} \
             --fasta {params.reference} \
             --regions {input.catalog} \
-            --tr-vcf {output.vcf} \
-            --num-threads {threads} &> {log}
+            --tr-vcf {output.vcf} &> {log}
         """
 
 rule LongTR_ont_filtered:
     input:
-        catalog = "tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed.gz",
+        catalog = "tool_comparison/adotto-variable-catalog-ont-longtr_rep{replicate}.bed",
         ont = "ont.cram",
     output:
         vcf = "tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.vcf.gz",
@@ -571,8 +730,55 @@ rule LongTR_ont_filtered:
             --bams {input.ont} \
             --fasta {params.reference} \
             --regions {input.catalog} \
-            --tr-vcf {output.vcf} \
-            --num-threads {threads} &> {log}
+            --tr-vcf {output.vcf} &> {log}
+        """
+
+rule convert_trgt_pacbio:
+    """
+    TRGT coordinates should not be corrected between VCF and inquiSTR call format
+    """
+    input:
+        vcf = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.inq.gz"
+    log:
+        "logs/convert_trgt_pacbio_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        {params.inquiSTR} convert --off-by-one {input.vcf} 2> {log} | gzip > {output.inq}
+        """
+
+rule convert_longtr_pacbio:
+    input:
+        vcf = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.vcf.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.inq.gz"
+    log:
+        "logs/convert_longtr_pacbio_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        {params.inquiSTR} convert --off-by-one {input.vcf} 2> {log} | gzip > {output.inq}
+        """
+
+rule convert_longtr_ont:
+    input:
+        vcf = "tool_comparison/ont-longtr-adotto_rep{replicate}.vcf.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/ont-longtr-adotto_rep{replicate}.inq.gz"
+    log:
+        "logs/convert_longtr_ont_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR
+    shell:
+        """
+        {params.inquiSTR} convert --off-by-one {input.vcf} 2> {log} | gzip > {output.inq}
         """
 
 rule aggregate_tool_comparison:
@@ -584,11 +790,15 @@ rule aggregate_tool_comparison:
         pacbio_filter_time = expand("tool_comparison/filter-inquistr-pacbio_rep{replicate}.time", replicate=REPLICATES),
         pacbio_trgt_filtered_time = expand("tool_comparison/pacbio-trgt-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
         pacbio_longtr_filtered_time = expand("tool_comparison/pacbio-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_longtr_inquistr_time = expand("tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.time", replicate=REPLICATES),
+        pacbio_longtr_filter_time = expand("tool_comparison/filter-inquistr-pacbio-longtr_rep{replicate}.time", replicate=REPLICATES),
         # ONT timing files
         ont_inquistr_time = expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
         ont_longtr_time = expand("tool_comparison/ont-longtr-adotto_rep{replicate}.time", replicate=REPLICATES),
         ont_filter_time = expand("tool_comparison/filter-inquistr-ont_rep{replicate}.time", replicate=REPLICATES),
-        ont_longtr_filtered_time = expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES)
+        ont_longtr_filtered_time = expand("tool_comparison/ont-longtr-adotto-filtered_rep{replicate}.time", replicate=REPLICATES),
+        ont_longtr_inquistr_time = expand("tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.time", replicate=REPLICATES),
+        ont_longtr_filter_time = expand("tool_comparison/filter-inquistr-ont-longtr_rep{replicate}.time", replicate=REPLICATES)
     output:
         "tool_comparison/results.tsv"
     run:
@@ -663,7 +873,7 @@ rule aggregate_tool_comparison:
             'inquiSTR+TRGT', 'pacbio', results
         )
         add_combined_tool(
-            input.pacbio_inquistr_time, input.pacbio_filter_time, input.pacbio_longtr_filtered_time,
+            input.pacbio_longtr_inquistr_time, input.pacbio_longtr_filter_time, input.pacbio_longtr_filtered_time,
             'inquiSTR+LongTR', 'pacbio', results
         )
 
@@ -673,7 +883,7 @@ rule aggregate_tool_comparison:
 
         # ONT combined pipeline
         add_combined_tool(
-            input.ont_inquistr_time, input.ont_filter_time, input.ont_longtr_filtered_time,
+            input.ont_longtr_inquistr_time, input.ont_longtr_filter_time, input.ont_longtr_filtered_time,
             'inquiSTR+LongTR', 'ont', results
         )
 
@@ -681,33 +891,97 @@ rule aggregate_tool_comparison:
         df = df.sort_values(['technology', 'tool', 'replicate'])
         df.to_csv(output[0], sep='\t', index=False)
 
-rule capture_tool_versions:
+rule benchmark_inquistr_vs_trgt_pacbio:
+    """
+    Compare inquiSTR PacBio genotypes (--test) against TRGT PacBio genotypes converted to
+    inquiSTR format (--truth). Uses rep1 as a representative call for accuracy comparison.
+    """
+    input:
+        test = "tool_comparison/pacbio-inquistr-adotto_rep1.inq.gz",
+        truth = "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
     output:
-        "tool_versions.txt"
+        txt = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
+        plot = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.html",
+        diff_out = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio_discrepancies.tsv"
     params:
         inquiSTR = inquiSTR,
-        TRGT = TRGT,
-        LongTR = LongTR
+        max_locus = MAX_LOCUS,
+        tolerance = 3
     log:
-        "logs/capture_tool_versions.log"
+        "logs/benchmark_inquistr_vs_trgt_pacbio.log"
     shell:
         """
-        {{
-            echo "Tool Versions Summary"
-            echo "====================="
-            echo ""
-            echo "inquiSTR:"
-            {params.inquiSTR} --version 2>&1 || echo "Version command not available"
-            echo ""
-            echo "TRGT:"
-            {params.TRGT} --version 2>&1 || echo "Version command not available"
-            echo ""
-            echo "LongTR:"
-            {params.LongTR} --version 2>&1 || echo "Version command not available"
-            echo ""
-            echo "Generated on: $(date)"
-        }} > {output} 2> {log}
+        {params.inquiSTR} benchmark \
+            --test {input.test} \
+            --truth {input.truth} \
+            --plot {output.plot} \
+            --diff-out {output.diff_out} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            > {output.txt} 2> {log}
         """
+
+
+rule benchmark_inquistr_vs_longtr_pacbio:
+    """
+    Compare inquiSTR PacBio genotypes (--test) against LongTR PacBio genotypes converted to
+    inquiSTR format (--truth). Uses rep1 as a representative call for accuracy comparison.
+    """
+    input:
+        test = "tool_comparison/pacbio-inquistr-adotto_rep1.inq.gz",
+        truth = "tool_comparison/pacbio-longtr-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
+        plot = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.html",
+        diff_out = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio_discrepancies.tsv"
+    params:
+        inquiSTR = inquiSTR,
+        max_locus = MAX_LOCUS
+    log:
+        "logs/benchmark_inquistr_vs_longtr_pacbio.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \\
+            --test {input.test} \\
+            --truth {input.truth} \\
+            --plot {output.plot} \\
+            --diff-out {output.diff_out} \\
+            --max-locus {params.max_locus} \\
+            > {output.txt} 2> {log}
+        """
+
+
+rule benchmark_inquistr_vs_longtr_ont:
+    """
+    Compare inquiSTR ONT genotypes (--test) against LongTR ONT genotypes converted to
+    inquiSTR format (--truth). Uses rep1 as a representative call for accuracy comparison.
+    """
+    input:
+        test = "tool_comparison/ont-inquistr-adotto_rep1.inq.gz",
+        truth = "tool_comparison/ont-longtr-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
+        plot = "tool_comparison/benchmark_inquistr_vs_longtr_ont.html",
+        diff_out = "tool_comparison/benchmark_inquistr_vs_longtr_ont_discrepancies.tsv"
+    params:
+        inquiSTR = inquiSTR,
+        max_locus = MAX_LOCUS
+    log:
+        "logs/benchmark_inquistr_vs_longtr_ont.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \\
+            --test {input.test} \\
+            --truth {input.truth} \\
+            --plot {output.plot} \\
+            --diff-out {output.diff_out} \\
+            --max-locus {params.max_locus} \\
+            > {output.txt} 2> {log}
+        """
+
 
 rule inquiSTR_accuracy:
     """
@@ -731,12 +1005,12 @@ rule inquiSTR_accuracy:
     shell:
         """
         {params.inquiSTR} benchmark \
-            --bed {input.truth_bed} \
+            --truth {input.truth_bed} \
             --mode MAX \
             --tier1 \
             --plot {output.plot} \
             --tolerance {params.tolerance} \
             --max-locus {params.max_locus} \
-            {input.genotypes} \
+            --test {input.genotypes} \
             > {output.txt} 2> {log}
         """
