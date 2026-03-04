@@ -93,6 +93,11 @@ rule all:
         "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
         "tool_comparison/benchmark_inquistr_vs_longtr_ont.html",
         "tool_comparison/benchmark_inquistr_vs_longtr_ont_discrepancies.tsv",
+        # inquiSTR --require-spanning vs TRGT benchmark
+        "tool_comparison/pacbio-inquistr-adotto-requirespanning.inq.gz",
+        "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.tsv",
+        "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.html",
+        "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio_discrepancies.tsv",
         expand("benchmarking/accuracy_{technology}.tsv", technology=TECHNOLOGIES),
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
@@ -187,7 +192,7 @@ rule genotype_polymorphic:
         reference = reference,
         inquiSTR = inquiSTR,
         max_locus = MAX_LOCUS # limit to loci shorter than 10kb for genotyping
-    threads: 4
+    threads: 24
     log:
         "logs/genotype_polymorphic.log"
     shell:
@@ -195,7 +200,6 @@ rule genotype_polymorphic:
         {params.inquiSTR} batch {input.manifest} \
             --output {output} \
             --region-file {input.bed} \
-            --unphased \
             --threads {threads} \
             --reference {params.reference} \
             --max-locus {params.max_locus} \
@@ -266,7 +270,7 @@ rule genotype_adotto:
         {params.inquiSTR} batch {input.manifest} \
             --region-file {input.bed} \
             --output {output} \
-            --unphased \
+            --noextend \
             --threads {threads} \
             --parallel-samples 4 \
             --max-locus {params.max_locus} \
@@ -301,6 +305,7 @@ rule benchmark_call:
         {params.inquiSTR} call {input.cram} \
             --region-file {input.bed} \
             --threads {threads} \
+            --noextend \
             --max-locus {params.max_locus} \
             --reference {params.reference} \
             > {output.result} 2> {log}
@@ -436,7 +441,7 @@ rule inquiSTR_adotto:
             --threads {threads} \
             --reference {params.reference} \
             --max-locus {params.max_locus} \
-            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+            --noextend 2> {log} | gzip > {output.inq} 2>> {log}
         """
 
 rule filter_inquiSTR_pacbio:
@@ -477,13 +482,13 @@ rule inquiSTR_adotto_longtr:
         benchmark_slot=1
     shell:
         """
-        /usr/bin/time -v -o {output.timing} \\
-        {params.inquiSTR} call {input.pacbio} \\
-            --region-file {input.catalog} \\
-            --threads {threads} \\
-            --reference {params.reference} \\
-            --max-locus {params.max_locus} \\
-            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} call {input.pacbio} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --noextend 2> {log} | gzip > {output.inq} 2>> {log}
         """
 
 
@@ -502,7 +507,7 @@ rule filter_inquiSTR_pacbio_longtr:
         inquiSTR = inquiSTR
     shell:
         """
-        /usr/bin/time -v -o {output.timing} \\
+        /usr/bin/time -v -o {output.timing} \
         {params.inquiSTR} filter {input.pacbio_inq} --minchange 20 2> {log} | cut -f1-4 | grep -v '^#' | grep -v '^chromosome' > {output.catalog} 2>> {log}"""
 
 
@@ -610,7 +615,7 @@ rule inquiSTR_ont:
             --threads {threads} \
             --reference {params.reference} \
             --max-locus {params.max_locus} \
-            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+            --noextend 2> {log} | gzip > {output.inq} 2>> {log}
         """
 
 rule filter_inquiSTR_ont:
@@ -652,13 +657,13 @@ rule inquiSTR_ont_longtr:
         benchmark_slot=1
     shell:
         """
-        /usr/bin/time -v -o {output.timing} \\
-        {params.inquiSTR} call {input.ont} \\
-            --region-file {input.catalog} \\
-            --threads {threads} \\
-            --reference {params.reference} \\
-            --max-locus {params.max_locus} \\
-            --unphased 2> {log} | gzip > {output.inq} 2>> {log}
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} call {input.ont} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --noextend 2> {log} | gzip > {output.inq} 2>> {log}
         """
 
 
@@ -910,6 +915,66 @@ rule benchmark_inquistr_vs_trgt_pacbio:
         tolerance = 3
     log:
         "logs/benchmark_inquistr_vs_trgt_pacbio.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --test {input.test} \
+            --truth {input.truth} \
+            --plot {output.plot} \
+            --diff-out {output.diff_out} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            > {output.txt} 2> {log}
+        """
+
+
+rule inquiSTR_adotto_requirespanning:
+    """Run inquiSTR call on PacBio with --require-spanning to restrict genotypes to
+    loci fully covered by spanning reads, for direct comparison against TRGT."""
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        pacbio = "pacbio.cram",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/pacbio-inquistr-adotto-requirespanning.inq.gz"
+    log:
+        "logs/inquiSTR_adotto_requirespanning.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    threads:
+        4
+    shell:
+        """
+        {params.inquiSTR} call {input.pacbio} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --noextend \
+            --require-spanning 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+
+rule benchmark_inquistr_requirespanning_vs_trgt_pacbio:
+    """Compare inquiSTR PacBio --require-spanning genotypes against TRGT genotypes.
+    This isolates spanning-read-only calls to assess how much accuracy improves
+    when soft-clipped genotypes are excluded."""
+    input:
+        test = "tool_comparison/pacbio-inquistr-adotto-requirespanning.inq.gz",
+        truth = "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.tsv",
+        plot = "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.html",
+        diff_out = "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio_discrepancies.tsv"
+    params:
+        inquiSTR = inquiSTR,
+        max_locus = MAX_LOCUS,
+        tolerance = 3
+    log:
+        "logs/benchmark_inquistr_requirespanning_vs_trgt_pacbio.log"
     shell:
         """
         {params.inquiSTR} benchmark \
