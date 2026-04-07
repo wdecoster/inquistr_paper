@@ -1,15 +1,46 @@
 import pandas as pd
+import glob
+import os
+import random 
 
 # Include plotting rules from separate file
 include: "plotting.smk"
 
 file_path = "/home/AD/wdecoster/inquiSTR_paper/1000G_cohort.tsv"
 # Load a TSV file into a DataFrame, containing URLs of 1000 Genomes cram files
-df = pd.read_csv(file_path, sep='\t', usecols=['sample', 'hg38_path', 'source'])
-df = df[df["source"] == "Gustafson"]
+df = pd.read_csv(file_path, sep='\t', usecols=['sample', 'hg38_path', 'source', 'Superpopulation code'])
+df = df[df["source"] == "Noyvert/Schloissnig"] # these are cram files
 
-# get a list of 100 samples
-selected_samples = df[:100]
+# PCA cohort: 100 mixed samples, 20 per superpopulation
+# we can't take a random sample, because that would make the result of the workflow change every iteration, triggering a rerun
+samples_per_superpopulation = 20
+selected_samples = pd.concat([
+    df[df["Superpopulation code"] == "AFR"].head(samples_per_superpopulation),
+    df[df["Superpopulation code"] == "AMR"].head(samples_per_superpopulation),
+    df[df["Superpopulation code"] == "EAS"].head(samples_per_superpopulation),
+    df[df["Superpopulation code"] == "EUR"].head(samples_per_superpopulation),
+    df[df["Superpopulation code"] == "SAS"].head(samples_per_superpopulation),
+]).drop_duplicates(subset="sample")
+
+# Relatedness cohort: 100 EUR samples, must include HG01512 (father of HG01514) and realigned HG01514
+# The first 20 EUR overlap with the PCA cohort and don't need to be genotyped twice
+relatedness_samples = pd.concat([
+    df[df["sample"] == "HG01512"],
+    df[df["Superpopulation code"] == "EUR"],
+]).drop_duplicates(subset="sample").head(100)
+# HG01514 is added via the realign rule and included in the relatedness combine
+
+# All unique samples needing genotyping (union of PCA and relatedness cohorts)
+# HG01514 has special handling via the realign rule
+all_genotype_samples = pd.concat([selected_samples, relatedness_samples]).drop_duplicates(subset="sample")
+
+# Build lookup dicts for per-sample polymorphic genotyping
+POLYMORPHIC_SAMPLE_URLS = {row['sample']: row['hg38_path'] for _, row in all_genotype_samples.iterrows()}
+POLYMORPHIC_SAMPLES = list(POLYMORPHIC_SAMPLE_URLS.keys())
+
+# Sample lists for separate combine steps
+PCA_SAMPLES = list(selected_samples['sample'])
+RELATEDNESS_SAMPLES = list(relatedness_samples['sample'])
 
 
 reference = "/home/AD/wdecoster/database/GRCh38.fa"
@@ -24,14 +55,15 @@ REPLICATES = list(range(1,6))  # 5 replicates
 MAX_LOCUS = 10000  # limit to loci shorter than 10kb for genotyping
 
 # Randomize order of thread counts for benchmarking
-import random
 THREAD_ORDER = THREAD_COUNTS * len(REPLICATES)
 random.shuffle(THREAD_ORDER)
 
 # if the "tool_versions.txt" file exists, remove it to ensure fresh capture of tool versions
-import os
 if os.path.exists("tool_versions.txt"):
     os.remove("tool_versions.txt")
+
+# pathogenic expansions to genotype are in /home/AD/wdecoster/inquiSTR_paper/puretarget-data and have to be globbed to a list and genotyped with inquiSTR --pathogenic
+puretarget_files = [os.path.basename(f).replace(".bam", "") for f in glob.glob("/home/AD/wdecoster/inquiSTR_paper/puretarget-data/*.bam")]
 
 rule all:
     input:
@@ -157,6 +189,7 @@ rule polymorphic:
     input:
         "polymorphic/repeats_relate.tsv",
         "polymorphic/repeats_pca.html",
+        "polymorphic/repeats_pca_colored.html",
 
 rule create_manifest_selected_samples:
     output:
@@ -169,55 +202,127 @@ rule create_manifest_selected_samples:
             for idx, row in selected_samples.iterrows():
                 f.write(f"{row['hg38_path']}\t{row['sample']}\n")
 
-rule create_polymorphic_manifest:
-    output:
-        manifest = "polymorphic_manifest.tsv"
-    log:
-        "logs/create_polymorphic_manifest.log"
-    run:
-        with open(output.manifest, 'w') as f:
-            f.write("bam_path\tsample_name\n")
-            for idx, row in df.iterrows():
-                f.write(f"{row['hg38_path']}\t{row['sample']}\n")
-
-
-rule genotype_polymorphic:
+rule genotype_polymorphic_sample:
     input:
-        manifest = "polymorphic_manifest.tsv",
         bed = "polymorphic_repeats.hg38.bed",
-        version = "inquiSTR_version.txt"
     output:
-        "polymorphic/repeats_combined.tsv"
+        "polymorphic/individual/{sample}.tsv"
     params:
-        reference = reference,
+        url = lambda wildcards: POLYMORPHIC_SAMPLE_URLS[wildcards.sample],
+        reference = "/home/AD/wdecoster/database/1KG_ONT_VIENNA_hg38.fa",
         inquiSTR = inquiSTR,
-        max_locus = MAX_LOCUS # limit to loci shorter than 10kb for genotyping
-    threads: 24
+        max_locus = MAX_LOCUS,
+        cram = lambda wildcards: f"polymorphic/tmp/{wildcards.sample}.cram"
+    threads: 4
     log:
-        "logs/genotype_polymorphic.log"
+        "logs/genotype_polymorphic_{sample}.log"
     shell:
         """
-        {params.inquiSTR} batch {input.manifest} \
-            --output {output} \
+        mkdir -p polymorphic/tmp 2> {log}
+        wget -q -O {params.cram} {params.url} 2>> {log}
+        wget -q -O {params.cram}.crai {params.url}.crai 2>> {log}
+        {params.inquiSTR} call {params.cram} \
             --region-file {input.bed} \
-            --threads {threads} \
             --reference {params.reference} \
-            --max-locus {params.max_locus} \
-            --resume \
-            --keep-going \
-            > {log} 2>&1
+            --threads {threads} \
+            --unphased \
+            --max-locus {params.max_locus} > {output} 2>> {log}
+        rm -f {params.cram} {params.cram}.crai 2>> {log}
         """
+
+rule realign_HG01514:
+    input:
+        "/home/AD/wdecoster/study322-ONT_genomes/all_files/rr_HG01514/LCYT/209418/v7.3.11/cram/rr_HG01514§LCYT.cram"
+    output:
+        cram = "polymorphic/tmp/HG01514_realigned.cram",
+        crai = "polymorphic/tmp/HG01514_realigned.cram.crai"
+    params:
+        reference = "/home/AD/wdecoster/database/1KG_ONT_VIENNA_hg38.fa",
+    threads:
+        20
+    conda:
+        "envs/minimap2.yml" # also includes samtools
+    log:
+        "logs/realign_HG01514.log"
+    shell:
+        """
+        mkdir -p polymorphic/tmp
+        samtools fastq -@ {threads} {input} 2>> {log} \
+        | minimap2 -ax map-ont -t {threads} {params.reference} - 2>> {log} \
+        | samtools sort --write-index -o {output.cram} - 2>> {log}
+        """
+
+rule genotype_HG01514:
+    # run inquiSTR call on the realigned HG01514
+    input:
+        bed = "polymorphic_repeats.hg38.bed",
+        cram = "polymorphic/tmp/HG01514_realigned.cram",
+        crai = "polymorphic/tmp/HG01514_realigned.cram.crai"
+    output:
+        "polymorphic/individual/HG01514.tsv"
+    params:
+        reference = "/home/AD/wdecoster/database/1KG_ONT_VIENNA_hg38.fa",
+        inquiSTR = inquiSTR,
+        max_locus = MAX_LOCUS
+    threads: 4
+    log:
+        "logs/genotype_HG01514.log"
+    shell:
+        """
+        {params.inquiSTR} call {input.cram} \
+            --region-file {input.bed} \
+            --reference {params.reference} \
+            --threads {threads} \
+            --unphased \
+            --max-locus {params.max_locus} > {output} 2> {log}
+        """
+
+
+rule combine_pca:
+    input:
+        expand("polymorphic/individual/{sample}.tsv", sample=PCA_SAMPLES),
+    output:
+        "polymorphic/repeats_pca_combined.tsv"
+    log:
+        "logs/combine_pca.log"
+    threads:
+        4
+    params:
+        inquiSTR = inquiSTR,
+    shell:
+        """
+        {params.inquiSTR} combine --threads {threads} {input} > {output} 2> {log}
+        """
+
+rule combine_relatedness:
+    input:
+        samples = expand("polymorphic/individual/{sample}.tsv", sample=RELATEDNESS_SAMPLES),
+        hg01514 = "polymorphic/individual/HG01514.tsv"
+    output:
+        "polymorphic/repeats_relatedness_combined.tsv"
+    log:
+        "logs/combine_relatedness.log"
+    threads:
+        4
+    params:
+        inquiSTR = inquiSTR,
+    shell:
+        """
+        {params.inquiSTR} combine --threads {threads} {input.samples} {input.hg01514} > {output} 2> {log}
+        """
+
 
 
 rule polymorphic_relate:
     input:
-        "polymorphic/repeats_combined.tsv",
-        version = "inquiSTR_version.txt"
+        combined = "polymorphic/repeats_relatedness_combined.tsv",
     output:
         "polymorphic/repeats_relate.tsv"
     threads: 16
     params:
-        inquiSTR = inquiSTR
+        inquiSTR = inquiSTR,
+        min_spacing = 100000, # also the default, but set explicitly for transparency
+        tolerance = 1, # also the default, but set explicitly for transparency
     log:
         "logs/polymorphic_relate.log"
     shell:
@@ -225,17 +330,19 @@ rule polymorphic_relate:
         {params.inquiSTR} relate \
             --output {output} \
             --threads {threads} \
-            {input} \
+            --min-spacing {params.min_spacing} \
+            --tolerance {params.tolerance} \
+            {input.combined} \
             > {log} 2>&1
         """
 
 
 rule polymorphic_pca:
     input:
-        "polymorphic/repeats_combined.tsv",
-        version = "inquiSTR_version.txt"
+        combined = "polymorphic/repeats_pca_combined.tsv",
     output:
-        "polymorphic/repeats_pca.html"
+        plot = "polymorphic/repeats_pca.html",
+        scores = "polymorphic/repeats_pca_scores.tsv"
     threads: 16
     params:
         inquiSTR = inquiSTR
@@ -244,9 +351,10 @@ rule polymorphic_pca:
     shell:
         """
         {params.inquiSTR} pca \
-            --output {output} \
+            --output {output.plot} \
             --threads {threads} \
-            {input} \
+            --scores {output.scores} \
+            {input.combined} \
             > {log} 2>&1
         """
 
@@ -447,7 +555,6 @@ rule inquiSTR_adotto:
 rule filter_inquiSTR_pacbio:
     input:
         pacbio_inq = "tool_comparison/pacbio-inquistr-adotto_rep{replicate}.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         catalog = "tool_comparison/adotto-variable-catalog-pacbio_rep{replicate}.bed",
         timing = "tool_comparison/filter-inquistr-pacbio_rep{replicate}.time"
@@ -497,7 +604,6 @@ rule filter_inquiSTR_pacbio_longtr:
     producing a LongTR-compatible catalog (motif-only 4th field)."""
     input:
         pacbio_inq = "tool_comparison/pacbio-inquistr-adotto-longtr_rep{replicate}.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         catalog = "tool_comparison/adotto-variable-catalog-pacbio-longtr_rep{replicate}.bed",
         timing = "tool_comparison/filter-inquistr-pacbio-longtr_rep{replicate}.time"
@@ -621,7 +727,6 @@ rule inquiSTR_ont:
 rule filter_inquiSTR_ont:
     input:
         ont_inq = "tool_comparison/ont-inquistr-adotto_rep{replicate}.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         catalog = "tool_comparison/adotto-variable-catalog-ont_rep{replicate}.bed",
         timing = "tool_comparison/filter-inquistr-ont_rep{replicate}.time"
@@ -671,8 +776,7 @@ rule filter_inquiSTR_ont_longtr:
     """Filter the LongTR-catalog inquiSTR ONT calls to variable loci,
     producing a LongTR-compatible catalog (motif-only 4th field)."""
     input:
-        ont_inq = "tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.inq.gz",
-        version = "inquiSTR_version.txt"
+        ont_inq = "tool_comparison/ont-inquistr-adotto-longtr_rep{replicate}.inq.gz"
     output:
         catalog = "tool_comparison/adotto-variable-catalog-ont-longtr_rep{replicate}.bed",
         timing = "tool_comparison/filter-inquistr-ont-longtr_rep{replicate}.time"
@@ -743,8 +847,7 @@ rule convert_trgt_pacbio:
     TRGT coordinates should not be corrected between VCF and inquiSTR call format
     """
     input:
-        vcf = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz",
-        version = "inquiSTR_version.txt"
+        vcf = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz"
     output:
         inq = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.inq.gz"
     log:
@@ -759,7 +862,6 @@ rule convert_trgt_pacbio:
 rule convert_longtr_pacbio:
     input:
         vcf = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.vcf.gz",
-        version = "inquiSTR_version.txt"
     output:
         inq = "tool_comparison/pacbio-longtr-adotto_rep{replicate}.inq.gz"
     log:
@@ -774,7 +876,6 @@ rule convert_longtr_pacbio:
 rule convert_longtr_ont:
     input:
         vcf = "tool_comparison/ont-longtr-adotto_rep{replicate}.vcf.gz",
-        version = "inquiSTR_version.txt"
     output:
         inq = "tool_comparison/ont-longtr-adotto_rep{replicate}.inq.gz"
     log:
@@ -904,7 +1005,6 @@ rule benchmark_inquistr_vs_trgt_pacbio:
     input:
         test = "tool_comparison/pacbio-inquistr-adotto_rep1.inq.gz",
         truth = "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         txt = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
         plot = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.html",
@@ -964,7 +1064,6 @@ rule benchmark_inquistr_requirespanning_vs_trgt_pacbio:
     input:
         test = "tool_comparison/pacbio-inquistr-adotto-requirespanning.inq.gz",
         truth = "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         txt = "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.tsv",
         plot = "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.html",
@@ -996,7 +1095,6 @@ rule benchmark_inquistr_vs_longtr_pacbio:
     input:
         test = "tool_comparison/pacbio-inquistr-adotto_rep1.inq.gz",
         truth = "tool_comparison/pacbio-longtr-adotto_rep1.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         txt = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
         plot = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.html",
@@ -1026,7 +1124,6 @@ rule benchmark_inquistr_vs_longtr_ont:
     input:
         test = "tool_comparison/ont-inquistr-adotto_rep1.inq.gz",
         truth = "tool_comparison/ont-longtr-adotto_rep1.inq.gz",
-        version = "inquiSTR_version.txt"
     output:
         txt = "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
         plot = "tool_comparison/benchmark_inquistr_vs_longtr_ont.html",
@@ -1078,4 +1175,40 @@ rule inquiSTR_accuracy:
             --max-locus {params.max_locus} \
             --test {input.genotypes} \
             > {output.txt} 2> {log}
+        """
+
+rule pathogenic:
+    input:
+        inquistr = expand("puretarget-calls/{sample}.inq", sample=puretarget_files),
+        combined = "puretarget-calls/combined.tsv",
+        heatmap = "puretarget-calls/heatmap.html",
+
+rule combine_puretarget:
+    input:
+        expand("puretarget-calls/{sample}.inq", sample=puretarget_files),
+    output:
+        "puretarget-calls/combined.tsv"
+    log:
+        "logs/combine_puretarget.log"
+    threads: 4
+    params:
+        inquiSTR = inquiSTR,
+    shell:
+        """
+        {params.inquiSTR} combine --threads {threads} {input} > {output} 2> {log}
+        """
+
+rule genotype_puretarget:
+    input:
+        bam = "/home/AD/wdecoster/inquiSTR_paper/puretarget-data/{sample}.bam",
+    output:
+        inq = "puretarget-calls/{sample}.inq",
+    log:
+        "logs/genotype_puretarget_{sample}.log"
+    params:
+        reference = reference,
+        inquiSTR = inquiSTR,
+    shell:
+        """
+        {params.inquiSTR} call --preset pathogenic --imbalance 0.1 --unphased {input.bam} > {output.inq} 2> {log}
         """
