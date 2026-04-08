@@ -278,14 +278,15 @@ rule plot_tool_comparison_time:
                 ), row=1, col=col_i)
 
         fig.update_layout(
-            title='Tool Comparison: Runtime (mean with individual replicates)',
+            title='Tool Comparison: Runtime',
+            title_x=0.5,
             barmode='overlay',
             plot_bgcolor='white',
             font=dict(size=20),
             title_font_size=24,
             width=1000,
             height=600,
-            legend=dict(yanchor='top', y=0.99, xanchor='right', x=0.99, font=dict(size=18)),
+            showlegend=False,
         )
         # Make subplot titles larger
         for annotation in fig['layout']['annotations']:
@@ -321,16 +322,17 @@ rule plot_tool_comparison_memory:
     run:
         import pandas as pd
         import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
 
         # Read the data
         df = pd.read_csv(input[0], sep='\t')
 
-        # Define ordering
-        tool_order = ['inquiSTR', 'TRGT', 'inquiSTR+TRGT', 'LongTR', 'inquiSTR+LongTR']
-        tech_order = ['pacbio', 'ont']
-        tech_labels = {'pacbio': 'PacBio', 'ont': 'ONT'}
+        # Tools per subplot
+        subplots = [
+            ('PacBio', 'pacbio', ['inquiSTR', 'TRGT', 'inquiSTR+TRGT']),
+            ('ONT', 'ont', ['inquiSTR', 'LongTR', 'inquiSTR+LongTR']),
+        ]
 
-        # One color per tool
         tool_colors = {
             'inquiSTR':       '#1f77b4',
             'TRGT':           '#ff7f0e',
@@ -339,66 +341,79 @@ rule plot_tool_comparison_memory:
             'inquiSTR+LongTR':'#9467bd',
         }
 
-        group_width = 0.8
-        tool_seen = set()
-        fig = go.Figure()
+        fig = make_subplots(rows=1, cols=2, subplot_titles=[s[0] for s in subplots],
+                            horizontal_spacing=0.15)
 
-        for tech_i, tech in enumerate(tech_order):
+        tool_seen = set()
+        for col_i, (label, tech, tools) in enumerate(subplots, start=1):
             tech_df = df[df['technology'] == tech]
-            present_tools = [t for t in tool_order if t in tech_df['tool'].values]
+            present_tools = [t for t in tools if t in tech_df['tool'].values]
             n = len(present_tools)
+            group_width = 0.8
             bw = group_width / n
 
             for j, tool in enumerate(present_tools):
                 offset = (j - (n - 1) / 2) * bw
-                x = tech_i + offset
+                x = offset
                 color = tool_colors[tool]
                 tool_df = tech_df[tech_df['tool'] == tool]
                 mean_val = tool_df['max_memory_gb'].mean()
 
                 fig.add_trace(go.Bar(
-                    x=[x],
-                    y=[mean_val],
-                    name=tool,
-                    marker_color=color,
-                    opacity=0.8,
+                    x=[x], y=[mean_val],
+                    name=tool, marker_color=color, opacity=0.8,
                     width=bw * 0.9,
-                    text=[f"{mean_val:.2f} GB"],
+                    text=[f"{mean_val:.1f} GB"],
                     textposition='outside',
+                    textfont=dict(size=16),
                     legendgroup=tool,
-                    showlegend=(tool not in tool_seen),
-                ))
+                    showlegend=False,
+                ), row=1, col=col_i)
                 tool_seen.add(tool)
 
                 fig.add_trace(go.Scatter(
                     x=[x] * len(tool_df),
                     y=tool_df['max_memory_gb'],
                     mode='markers',
-                    marker=dict(color=color, size=9, opacity=0.6,
+                    marker=dict(color=color, size=12, opacity=0.6,
                                 line=dict(width=1, color='white')),
-                    legendgroup=tool,
-                    showlegend=False,
-                ))
+                    legendgroup=tool, showlegend=False,
+                ), row=1, col=col_i)
 
         fig.update_layout(
-            title='Tool Comparison: Memory Usage (mean with individual replicates)',
-            xaxis_title='Technology',
-            yaxis_title='Maximum Memory Usage (GB)',
+            title='Tool Comparison: Memory Usage',
+            title_x=0.5,
             barmode='overlay',
             plot_bgcolor='white',
-            font=dict(size=16),
-            title_font_size=20,
-            xaxis=dict(
-                tickmode='array',
-                tickvals=list(range(len(tech_order))),
-                ticktext=[tech_labels[t] for t in tech_order],
-                tickfont=dict(size=16),
-            ),
-            legend=dict(yanchor='top', y=0.99, xanchor='right', x=0.99, font=dict(size=14)),
+            font=dict(size=20),
+            title_font_size=24,
+            width=1000,
+            height=600,
+            showlegend=False,
         )
-        fig.update_xaxes(showgrid=False, showline=True, linewidth=2, linecolor='black', title_font_size=18)
-        fig.update_yaxes(showgrid=True, gridcolor='lightgray', showline=True,
-                         linewidth=2, linecolor='black', title_font_size=18, tickfont_size=16)
+        # Make subplot titles larger
+        for annotation in fig['layout']['annotations']:
+            annotation['font'] = dict(size=22)
+
+        for col_i, (label, tech, tools) in enumerate(subplots, start=1):
+            present_tools = [t for t in tools if t in df[df['technology'] == tech]['tool'].values]
+            n = len(present_tools)
+            bw = 0.8 / n
+            tick_positions = [(j - (n - 1) / 2) * bw for j in range(n)]
+            xaxis = f"xaxis{col_i}" if col_i > 1 else "xaxis"
+            yaxis = f"yaxis{col_i}" if col_i > 1 else "yaxis"
+            fig.update_layout(**{
+                xaxis: dict(
+                    tickmode='array', tickvals=tick_positions, ticktext=present_tools,
+                    tickfont=dict(size=16), showgrid=False, showline=True,
+                    linewidth=2, linecolor='black',
+                ),
+                yaxis: dict(
+                    title='Maximum Memory Usage (GB)', title_font_size=20, tickfont_size=18,
+                    showgrid=True, gridcolor='lightgray', showline=True,
+                    linewidth=2, linecolor='black', zeroline=False,
+                ),
+            })
 
         fig.write_html(output[0])
 
@@ -543,12 +558,12 @@ rule plot_puretarget_heatmap:
         ]
 
         barcode_to_sample = {
-            "bc2009": "Random_donor4888",
-            "bc2016": "HG2/NA24385",
-            "bc2017": "Random_donor8375",
-            "bc2020": "Random_donor8359",
-            "bc2021": "Random_donor8360",
-            "bc2024": "Random_donor8361",
+            "bc2009": "donor4888",
+            "bc2016": "NA24385",
+            "bc2017": "donor8375",
+            "bc2020": "donor8359",
+            "bc2021": "donor8360",
+            "bc2024": "donor8361",
             "bc2025": "HM13509",
             "bc2026": "HM06926",
             "bc2027": "NA13537",
@@ -632,39 +647,39 @@ rule plot_puretarget_heatmap:
                 title=None,
                 orientation='h',
                 x=0.5,
-                y=1.15,
+                y=-0.3,
                 xanchor='center',
-                yanchor='bottom',
+                yanchor='top',
                 tickvals=[0, 0.5, 1],
                 ticktext=['short', 'mid', 'long'],
                 tickfont=dict(size=14),
-                title_font=dict(size=16),
                 len=0.8,
             ),
             zmin=0, zmax=1,
         ))
 
         fig.update_layout(
-            title='STR lengths per individual (in repeat units)',
+            title='Pathogenic TR lengths',
+            title_x=0.5,
             title_font_size=22,
             plot_bgcolor='white',
             font=dict(size=14),
             xaxis=dict(
-                title='Individual',
+                title='',
                 title_font_size=18,
-                tickfont=dict(size=12),
+                tickfont=dict(size=14),
                 tickangle=45,
                 showgrid=False,
             ),
             yaxis=dict(
-                title='Repeat<br>locus',
+                title='',
                 title_font_size=18,
-                tickfont=dict(size=12),
+                tickfont=dict(size=14),
                 showgrid=False,
                 autorange='reversed',
             ),
-            margin=dict(l=120, b=200, t=80, r=80),
-            width=1000,
+            margin=dict(l=0, b=0, t=50, r=0),
+            width=800,
             height=400,
         )
 
@@ -673,11 +688,11 @@ rule plot_puretarget_heatmap:
         n_loci = len(scaled.index)
         y0, y1 = -0.5, n_loci - 0.5
 
-        # Group 1: non-carriers (start to Random_donor8361)
+        # Group 1: non-carriers (start to donor8361)
         # Group 2: carriers (HM13509 to NA20752)
         # Group 3: FXN carriers (NA15848 to end)
-        if 'Random_donor8361' in samples_list:
-            idx = samples_list.index('Random_donor8361')
+        if 'donor8361' in samples_list:
+            idx = samples_list.index('donor8361')
             fig.add_shape(type='rect', x0=-0.5, x1=idx + 0.5, y0=y0, y1=y1,
                           line=dict(color='black', width=2))
         if 'HM13509' in samples_list and 'NA20752' in samples_list:
