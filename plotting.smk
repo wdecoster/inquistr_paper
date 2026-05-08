@@ -45,7 +45,7 @@ rule plot_benchmark_results:
                 name=f'{tech} (replicates)',
                 marker=dict(
                     color=colors[tech],
-                    size=10,
+                    size=12,
                     opacity=0.5
                 ),
                 showlegend=False
@@ -63,26 +63,29 @@ rule plot_benchmark_results:
                 ),
                 marker=dict(
                     color=colors[tech],
-                    size=14
+                    size=12
                 ),
                 showlegend=True
             ))
         
         # Update layout
         fig.update_layout(
-            title='Benchmark Results: Runtime vs Thread Count',
-            xaxis_title='Number of Threads',
-            yaxis_title='Elapsed Time (minutes)',
+            title='Runtime vs. threads',
+            xaxis_title='Number of threads',
+            yaxis_title='Run time (minutes)',
             plot_bgcolor='white',
             hovermode='closest',
-            font=dict(size=16),
-            title_font_size=20,
+            font=dict(size=30),
+            title_font_size=42,
+            width=700,
+            height=900,
+            hoverlabel=dict(font_size=24),
             legend=dict(
                 yanchor="top",
                 y=0.99,
                 xanchor="right",
                 x=0.99,
-                font=dict(size=14),
+                font=dict(size=30),
             )
         )
         
@@ -93,8 +96,8 @@ rule plot_benchmark_results:
             showline=True,
             linewidth=2,
             linecolor='black',
-            title_font_size=18,
-            tickfont_size=16,
+            title_font_size=34,
+            tickfont_size=28,
         )
         fig.update_yaxes(
             showgrid=True,
@@ -102,8 +105,8 @@ rule plot_benchmark_results:
             showline=True,
             linewidth=2,
             linecolor='black',
-            title_font_size=18,
-            tickfont_size=16,
+            title_font_size=34,
+            tickfont_size=28,
         )
         
         # Save the plot
@@ -146,7 +149,7 @@ rule plot_memory_usage:
                 name=f'{tech} (replicates)',
                 marker=dict(
                     color=colors[tech],
-                    size=10,
+                    size=12,
                     opacity=0.5
                 ),
                 showlegend=False
@@ -160,11 +163,11 @@ rule plot_memory_usage:
                 name=f'{tech}',
                 line=dict(
                     color=colors[tech],
-                    width=3
+                    width=5
                 ),
                 marker=dict(
                     color=colors[tech],
-                    size=14
+                    size=12
                 ),
                 showlegend=True
             ))
@@ -176,14 +179,15 @@ rule plot_memory_usage:
             yaxis_title='Maximum Memory Usage (GB)',
             plot_bgcolor='white',
             hovermode='closest',
-            font=dict(size=16),
-            title_font_size=20,
+            font=dict(size=30),
+            title_font_size=42,
+            hoverlabel=dict(font_size=24),
             legend=dict(
                 yanchor="top",
                 y=0.99,
                 xanchor="right",
                 x=0.99,
-                font=dict(size=14),
+                font=dict(size=30),
             )
         )
         
@@ -194,8 +198,8 @@ rule plot_memory_usage:
             showline=True,
             linewidth=2,
             linecolor='black',
-            title_font_size=18,
-            tickfont_size=16,
+            title_font_size=34,
+            tickfont_size=28,
         )
         fig.update_yaxes(
             showgrid=True,
@@ -203,8 +207,8 @@ rule plot_memory_usage:
             showline=True,
             linewidth=2,
             linecolor='black',
-            title_font_size=18,
-            tickfont_size=16,
+            title_font_size=34,
+            tickfont_size=28,
         )
         
         # Save the plot
@@ -284,7 +288,7 @@ rule plot_tool_comparison_time:
             plot_bgcolor='white',
             font=dict(size=20),
             title_font_size=24,
-            width=1000,
+            width=600,
             height=600,
             showlegend=False,
         )
@@ -306,7 +310,7 @@ rule plot_tool_comparison_time:
                     linewidth=2, linecolor='black',
                 ),
                 yaxis: dict(
-                    title='Elapsed Time (minutes)', title_font_size=20, tickfont_size=18,
+                    title='Run time (minutes)', title_font_size=20, tickfont_size=18,
                     showgrid=True, gridcolor='lightgray', showline=True,
                     linewidth=2, linecolor='black', zeroline=False,
                 ),
@@ -414,6 +418,249 @@ rule plot_tool_comparison_memory:
                     linewidth=2, linecolor='black', zeroline=False,
                 ),
             })
+
+        fig.write_html(output[0])
+
+
+rule plot_straglr_chr21_runtime:
+    input:
+        "tool_comparison/straglr_chr21_results.tsv"
+    output:
+        "tool_comparison/straglr_chr21_runtime_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        df = pd.read_csv(input[0], sep='\t')
+        df['tool'] = df['tool'].replace({'STRaglr': 'Straglr'})
+        df['elapsed_minutes'] = df['elapsed_seconds'] / 60
+
+        subplots = [
+            ('PacBio', 'pacbio'),
+            ('ONT', 'ont'),
+        ]
+
+        tool_order = ['inquiSTR', 'Straglr']
+        tool_colors = {
+            'inquiSTR': '#1f77b4',
+            'Straglr': '#d62728',
+        }
+
+        fig = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=[s[0] for s in subplots],
+            horizontal_spacing=0.12,
+        )
+
+        for col_i, (label, tech) in enumerate(subplots, start=1):
+            tech_df = df[df['technology'] == tech]
+            present_tools = [t for t in tool_order if t in tech_df['tool'].values]
+            n = len(present_tools)
+            if n == 0:
+                continue
+
+            group_width = 0.8
+            bw = group_width / n
+
+            for j, tool in enumerate(present_tools):
+                offset = (j - (n - 1) / 2) * bw
+                x = offset
+                color = tool_colors[tool]
+                tool_df = tech_df[tech_df['tool'] == tool]
+                mean_val = tool_df['elapsed_minutes'].mean()
+
+                fig.add_trace(go.Bar(
+                    x=[x], y=[mean_val],
+                    name=tool,
+                    marker_color=color,
+                    opacity=0.85,
+                    width=bw * 0.9,
+                    text=[f"{mean_val:.2f} min"],
+                    textposition='outside',
+                    textfont=dict(size=15),
+                    legendgroup=tool,
+                    showlegend=False,
+                ), row=1, col=col_i)
+
+                fig.add_trace(go.Scatter(
+                    x=[x] * len(tool_df),
+                    y=tool_df['elapsed_minutes'],
+                    mode='markers',
+                    marker=dict(
+                        color=color,
+                        size=11,
+                        opacity=0.65,
+                        line=dict(width=1, color='white'),
+                    ),
+                    legendgroup=tool,
+                    showlegend=False,
+                    hovertemplate=f"Tool: {tool}<br>Tech: {tech}<br>Replicate runtime: %{{y:.2f}} min<extra></extra>",
+                ), row=1, col=col_i)
+
+            tick_positions = [(j - (n - 1) / 2) * bw for j in range(n)]
+            xaxis = f"xaxis{col_i}" if col_i > 1 else "xaxis"
+            yaxis = f"yaxis{col_i}" if col_i > 1 else "yaxis"
+            fig.update_layout(**{
+                xaxis: dict(
+                    tickmode='array',
+                    tickvals=tick_positions,
+                    ticktext=present_tools,
+                    tickfont=dict(size=15),
+                    showgrid=False,
+                    showline=True,
+                    linewidth=2,
+                    linecolor='black',
+                ),
+                yaxis: dict(
+                    title='Run time (minutes)',
+                    title_font_size=19,
+                    tickfont_size=16,
+                    showgrid=True,
+                    gridcolor='lightgray',
+                    showline=True,
+                    linewidth=2,
+                    linecolor='black',
+                    zeroline=False,
+                ),
+            })
+
+        fig.update_layout(
+            title='Run time: inquiSTR vs Straglr',
+            title_x=0.5,
+            barmode='overlay',
+            plot_bgcolor='white',
+            font=dict(size=18),
+            title_font_size=24,
+            width=600,
+            height=620,
+            showlegend=False,
+        )
+
+        for annotation in fig['layout']['annotations']:
+            annotation['font'] = dict(size=21)
+
+        fig.write_html(output[0])
+
+
+rule plot_straglr_chr21_memory:
+    input:
+        "tool_comparison/straglr_chr21_results.tsv"
+    output:
+        "tool_comparison/straglr_chr21_memory_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        df = pd.read_csv(input[0], sep='\t')
+        df['tool'] = df['tool'].replace({'STRaglr': 'Straglr'})
+
+        subplots = [
+            ('PacBio', 'pacbio'),
+            ('ONT', 'ont'),
+        ]
+
+        tool_order = ['inquiSTR', 'Straglr']
+        tool_colors = {
+            'inquiSTR': '#1f77b4',
+            'Straglr': '#d62728',
+        }
+
+        fig = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=[s[0] for s in subplots],
+            horizontal_spacing=0.12,
+        )
+
+        for col_i, (label, tech) in enumerate(subplots, start=1):
+            tech_df = df[df['technology'] == tech]
+            present_tools = [t for t in tool_order if t in tech_df['tool'].values]
+            n = len(present_tools)
+            if n == 0:
+                continue
+
+            group_width = 0.8
+            bw = group_width / n
+
+            for j, tool in enumerate(present_tools):
+                offset = (j - (n - 1) / 2) * bw
+                x = offset
+                color = tool_colors[tool]
+                tool_df = tech_df[tech_df['tool'] == tool]
+                mean_val = tool_df['max_memory_gb'].mean()
+
+                fig.add_trace(go.Bar(
+                    x=[x], y=[mean_val],
+                    name=tool,
+                    marker_color=color,
+                    opacity=0.85,
+                    width=bw * 0.9,
+                    text=[f"{mean_val:.2f} GB"],
+                    textposition='outside',
+                    textfont=dict(size=15),
+                    legendgroup=tool,
+                    showlegend=False,
+                ), row=1, col=col_i)
+
+                fig.add_trace(go.Scatter(
+                    x=[x] * len(tool_df),
+                    y=tool_df['max_memory_gb'],
+                    mode='markers',
+                    marker=dict(
+                        color=color,
+                        size=11,
+                        opacity=0.65,
+                        line=dict(width=1, color='white'),
+                    ),
+                    legendgroup=tool,
+                    showlegend=False,
+                    hovertemplate=f"Tool: {tool}<br>Tech: {tech}<br>Replicate memory: %{{y:.2f}} GB<extra></extra>",
+                ), row=1, col=col_i)
+
+            tick_positions = [(j - (n - 1) / 2) * bw for j in range(n)]
+            xaxis = f"xaxis{col_i}" if col_i > 1 else "xaxis"
+            yaxis = f"yaxis{col_i}" if col_i > 1 else "yaxis"
+            fig.update_layout(**{
+                xaxis: dict(
+                    tickmode='array',
+                    tickvals=tick_positions,
+                    ticktext=present_tools,
+                    tickfont=dict(size=15),
+                    showgrid=False,
+                    showline=True,
+                    linewidth=2,
+                    linecolor='black',
+                ),
+                yaxis: dict(
+                    title='Maximum Memory Usage (GB)',
+                    title_font_size=19,
+                    tickfont_size=16,
+                    showgrid=True,
+                    gridcolor='lightgray',
+                    showline=True,
+                    linewidth=2,
+                    linecolor='black',
+                    zeroline=False,
+                ),
+            })
+
+        fig.update_layout(
+            title='Memory usage: inquiSTR vs Straglr',
+            title_x=0.5,
+            barmode='overlay',
+            plot_bgcolor='white',
+            font=dict(size=18),
+            title_font_size=24,
+            width=1050,
+            height=620,
+            showlegend=False,
+        )
+
+        for annotation in fig['layout']['annotations']:
+            annotation['font'] = dict(size=21)
 
         fig.write_html(output[0])
 

@@ -47,6 +47,7 @@ reference = "/home/AD/wdecoster/database/GRCh38.fa"
 inquiSTR = "/home/AD/wdecoster/repositories/inquiSTR/target/x86_64-unknown-linux-musl/release/inquiSTR"
 TRGT = "/home/AD/wdecoster/bin/trgt",
 LongTR = "/home/AD/wdecoster/anaconda3/envs/longtr/bin/LongTR"
+STRAGLR = "/home/AD/wdecoster/repositories/straglr/straglr.py" # requires environment with straglr dependencies
 
 # Benchmark parameters
 TECHNOLOGIES = ["ont", "pacbio"]
@@ -134,12 +135,59 @@ rule all:
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
         "tool_comparison/memory_plot.html",
+        "tool_comparison/straglr_chr21_catalog.bed",
+        expand("tool_comparison/{technology}-straglr-chr21_rep{replicate}.time", technology=TECHNOLOGIES, replicate=REPLICATES),
+        expand("tool_comparison/{technology}-inquistr-chr21_rep{replicate}.time", technology=TECHNOLOGIES, replicate=REPLICATES),
+        "tool_comparison/straglr_chr21_results.tsv",
+        "tool_comparison/straglr_chr21_runtime_plot.html",
+        "tool_comparison/straglr_chr21_memory_plot.html",
+        expand("tool_comparison/straglr_chr21_accuracy_{technology}.tsv", technology=TECHNOLOGIES),
+        expand("tool_comparison/straglr_chr21_accuracy_{technology}.html", technology=TECHNOLOGIES),
+        expand("tool_comparison/inquistr_chr21_accuracy_{technology}.tsv", technology=TECHNOLOGIES),
+        expand("tool_comparison/inquistr_chr21_accuracy_{technology}.html", technology=TECHNOLOGIES),
         "tool_versions.txt",
+        "straglr_version.txt",
         "inquiSTR_version.txt"
+
+rule straglr_chr21:
+    """Target rule for the chr21 STRaglr vs inquiSTR runtime comparison subset."""
+    input:
+        "tool_comparison/straglr_chr21_catalog.bed",
+        expand("tool_comparison/{technology}-straglr-chr21_rep{replicate}.tsv", technology=TECHNOLOGIES, replicate=REPLICATES),
+        expand("tool_comparison/{technology}-straglr-chr21_rep{replicate}.bed", technology=TECHNOLOGIES, replicate=REPLICATES),
+        expand("tool_comparison/{technology}-straglr-chr21_rep{replicate}.time", technology=TECHNOLOGIES, replicate=REPLICATES),
+        expand("tool_comparison/{technology}-inquistr-chr21_rep{replicate}.inq.gz", technology=TECHNOLOGIES, replicate=REPLICATES),
+        expand("tool_comparison/{technology}-inquistr-chr21_rep{replicate}.time", technology=TECHNOLOGIES, replicate=REPLICATES),
+        expand("tool_comparison/{technology}-straglr-chr21_rep{replicate}.inq.gz", technology=TECHNOLOGIES, replicate=["1"]),
+        "tool_comparison/straglr_chr21_results.tsv",
+        "tool_comparison/straglr_chr21_runtime_plot.html",
+        "tool_comparison/straglr_chr21_memory_plot.html",
+        expand("tool_comparison/straglr_chr21_accuracy_{technology}.tsv", technology=TECHNOLOGIES),
+        expand("tool_comparison/straglr_chr21_accuracy_{technology}.html", technology=TECHNOLOGIES),
+        expand("tool_comparison/inquistr_chr21_accuracy_{technology}.tsv", technology=TECHNOLOGIES),
+        expand("tool_comparison/inquistr_chr21_accuracy_{technology}.html", technology=TECHNOLOGIES)
 
 rule versions:
     input:
-        "tool_versions.txt"
+        "tool_versions.txt",
+        "straglr_version.txt"
+
+rule straglr_version:
+    """Capture STRaglr version using the STRaglr conda environment."""
+    input:
+        STRAGLR
+    output:
+        "straglr_version.txt"
+    params:
+        straglr = STRAGLR
+    conda:
+        "envs/straglr.yml"
+    log:
+        "logs/straglr_version.log"
+    shell:
+        """
+        {params.straglr} --version > {output} 2> {log} || {params.straglr} -h > {output} 2>> {log}
+        """
 
 rule inquiSTR_version:
     """Capture inquiSTR version to trigger reruns when version changes"""
@@ -157,6 +205,8 @@ rule inquiSTR_version:
         """
 
 rule capture_tool_versions:
+    input:
+        straglr_version = "straglr_version.txt"
     output:
         "tool_versions.txt"
     params:
@@ -179,6 +229,9 @@ rule capture_tool_versions:
             echo ""
             echo "LongTR:"
             {params.LongTR} --version 2>&1 || echo "Version command not available"
+            echo ""
+            echo "STRaglr:"
+            cat {input.straglr_version}
             echo ""
             echo "Generated on: $(date)"
         }} > {output} 2> {log}
@@ -1211,4 +1264,223 @@ rule genotype_puretarget:
     shell:
         """
         {params.inquiSTR} call --preset pathogenic --imbalance 0.1 --unphased {input.bam} > {output.inq} 2> {log}
+        """
+
+
+rule create_chr21_catalog_for_straglr:
+    """Create a minimal STR catalog containing only chr21 loci."""
+    input:
+        catalog = "adotto_TRGT.bed.gz"
+    output:
+        catalog = "tool_comparison/straglr_chr21_catalog.bed"
+    log:
+        "logs/create_chr21_catalog_for_straglr.log"
+    shell:
+        """
+        zcat {input.catalog} | awk 'BEGIN{{OFS="\t"}} $1=="chr21" {{
+            n=split($4, fields, ";");
+            motif="";
+            for (i=1; i<=n; i++) {{
+                if (fields[i] ~ /^STRUC=/) {{
+                    motif=fields[i];
+                    sub(/^STRUC=\\(/, "", motif);
+                    sub(/\\)n.*$/, "", motif);
+                    break;
+                }}
+            }}
+            if (motif != "" && length(motif) >= 2 && length(motif) <= 50) print $1, $2, $3, motif;
+        }}' > {output.catalog} 2> {log}
+        """
+
+
+rule run_straglr_chr21:
+    """Run STRaglr on a chr21-only catalog for both PacBio and ONT."""
+    input:
+        catalog = "tool_comparison/straglr_chr21_catalog.bed",
+        cram = "{technology}.cram"
+    output:
+        tsv = "tool_comparison/{technology}-straglr-chr21_rep{replicate}.tsv",
+        bed = "tool_comparison/{technology}-straglr-chr21_rep{replicate}.bed",
+        timing = "tool_comparison/{technology}-straglr-chr21_rep{replicate}.time"
+    log:
+        "logs/straglr_chr21_{technology}_rep{replicate}.log"
+    params:
+        straglr = STRAGLR,
+        reference = reference
+    resources:
+        benchmark_slot=1
+    threads:
+        4
+    conda:
+        "envs/straglr.yml"
+    shell:
+        """
+        prefix=$(echo {output.tsv} | sed 's/\\.tsv$//')
+        /usr/bin/time -v -o {output.timing} \
+        {params.straglr} {input.cram} {params.reference} $prefix \
+            --loci {input.catalog} \
+            --genotype_in_size \
+            --nprocs {threads} &> {log}
+        """
+
+
+rule run_inquistr_chr21:
+    """Run inquiSTR on the same chr21-only catalog for both PacBio and ONT."""
+    input:
+        catalog = "tool_comparison/straglr_chr21_catalog.bed",
+        cram = "{technology}.cram",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/{technology}-inquistr-chr21_rep{replicate}.inq.gz",
+        timing = "tool_comparison/{technology}-inquistr-chr21_rep{replicate}.time"
+    log:
+        "logs/inquistr_chr21_{technology}_rep{replicate}.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    resources:
+        benchmark_slot=1
+    threads:
+        4
+    shell:
+        """
+        /usr/bin/time -v -o {output.timing} \
+        {params.inquiSTR} call {input.cram} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --noextend 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+
+rule aggregate_straglr_chr21_results:
+    input:
+        straglr_time = expand("tool_comparison/{technology}-straglr-chr21_rep{replicate}.time", technology=TECHNOLOGIES, replicate=REPLICATES),
+        inquistr_time = expand("tool_comparison/{technology}-inquistr-chr21_rep{replicate}.time", technology=TECHNOLOGIES, replicate=REPLICATES)
+    output:
+        "tool_comparison/straglr_chr21_results.tsv"
+    run:
+        import re
+        import pandas as pd
+
+        def parse_timing_file(filepath):
+            elapsed_time = None
+            max_memory_kb = None
+            with open(filepath, 'r') as f:
+                for line in f:
+                    if 'Elapsed (wall clock) time' in line:
+                        time_str = line.split('): ', 1)[1].strip()
+                        parts = time_str.split(':')
+                        if len(parts) == 3:
+                            h, m, s = parts
+                            elapsed_time = int(h) * 3600 + int(m) * 60 + float(s)
+                        elif len(parts) == 2:
+                            m, s = parts
+                            elapsed_time = int(m) * 60 + float(s)
+                        elif len(parts) == 1:
+                            elapsed_time = float(parts[0])
+                    elif 'Maximum resident set size' in line:
+                        max_memory_kb = int(line.split(':')[1].strip())
+            return elapsed_time, max_memory_kb
+
+        def parse_metadata(filepath):
+            match = re.search(r'tool_comparison/(ont|pacbio)-(straglr|inquistr)-chr21_rep(\d+)\.time$', filepath)
+            if not match:
+                return None, None, None
+            technology, tool, replicate = match.groups()
+            tool_name = 'Straglr' if tool == 'straglr' else 'inquiSTR'
+            return technology, tool_name, int(replicate)
+
+        results = []
+        for timing_file in input:
+            technology, tool_name, replicate = parse_metadata(str(timing_file))
+            if technology is None:
+                continue
+            elapsed, memory = parse_timing_file(timing_file)
+            if elapsed is None or memory is None:
+                continue
+            results.append({
+                'technology': technology,
+                'tool': tool_name,
+                'replicate': replicate,
+                'elapsed_seconds': elapsed,
+                'max_memory_gb': memory / (1024 * 1024)
+            })
+
+        df = pd.DataFrame(results)
+        df = df.sort_values(['technology', 'tool', 'replicate'])
+        df.to_csv(output[0], sep='\t', index=False)
+
+rule convert_straglr_to_inquistr_format:
+    """Convert STRaglr BED output to inquiSTR format for benchmarking.
+    Removes header lines (starting with '#') and keeps columns 1-5 and 8.
+    Adds inquiSTR-compatible header.
+    """
+    input:
+        bed = "tool_comparison/{technology}-straglr-chr21_rep{replicate}.bed"
+    output:
+        inq = "tool_comparison/{technology}-straglr-chr21_rep{replicate}.inq.gz"
+    log:
+        "logs/convert_straglr_to_inquistr_{technology}_rep{replicate}.log"
+    shell:
+        """
+           awk 'BEGIN {{OFS="\t"; print "chromosome", "begin", "end", "info", "straglr_H1", "straglr_H2"}} \
+               $0 !~ /^#/ {{print $1, $2, $3, $4, $5, $8}}' {input.bed} \
+             | gzip > {output.inq} 2> {log}
+        """
+
+
+rule benchmark_straglr_chr21_accuracy:
+    """Benchmark STRaglr rep1 genotypes (rep1 for both ont and pacbio) against adotto truth."""
+    input:
+        test_inq = "tool_comparison/{technology}-straglr-chr21_rep1.inq.gz",
+        truth_bed = "/home/AD/wdecoster/optimize_inquiSTR/adotto/HG002_GRCh38_TandemRepeats_v1.0.bed.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/straglr_chr21_accuracy_{technology}.tsv",
+        plot = "tool_comparison/straglr_chr21_accuracy_{technology}.html"
+    params:
+        inquiSTR = inquiSTR,
+        tolerance = 3,
+        max_locus = MAX_LOCUS
+    log:
+        "logs/benchmark_straglr_chr21_accuracy_{technology}.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --test {input.test_inq} \
+            --truth {input.truth_bed} \
+            --plot {output.plot} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            > {output.txt} 2> {log}
+        """
+
+
+rule benchmark_inquistr_chr21_accuracy:
+    """Benchmark inquiSTR rep1 genotypes (rep1 for both ont and pacbio) against adotto truth."""
+    input:
+        test_inq = "tool_comparison/{technology}-inquistr-chr21_rep1.inq.gz",
+        truth_bed = "/home/AD/wdecoster/optimize_inquiSTR/adotto/HG002_GRCh38_TandemRepeats_v1.0.bed.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/inquistr_chr21_accuracy_{technology}.tsv",
+        plot = "tool_comparison/inquistr_chr21_accuracy_{technology}.html"
+    params:
+        inquiSTR = inquiSTR,
+        tolerance = 3,
+        max_locus = MAX_LOCUS
+    log:
+        "logs/benchmark_inquistr_chr21_accuracy_{technology}.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --test {input.test_inq} \
+            --truth {input.truth_bed} \
+            --plot {output.plot} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            > {output.txt} 2> {log}
         """
