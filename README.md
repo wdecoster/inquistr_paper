@@ -155,3 +155,10 @@ Key paper artefacts are the HTML plots (`*_plot.html`, `*.html`), the aggregated
 `accuracy_*.tsv` tables, the relatedness/PCA tables, and `tool_comparison/metrics_summary.txt`
 (plain-text speed and accuracy summary). All timing files (`*.time`) are produced by
 `/usr/bin/time -v` and parsed for wall-clock seconds and peak RSS.
+
+## Histogram GOLGA8A lengths
+
+```bash
+cd ~/inquistr_paper/groupplot
+./inquiSTR plot --region chr15:34419394-34419476 combined.tsv.gz --output groupplot.svg --sampleinfo cohort.tsv --condition aFTLD_U:PAT,CON --min 30
+```
