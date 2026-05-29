@@ -131,6 +131,11 @@ rule all:
         "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.tsv",
         "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio.html",
         "tool_comparison/benchmark_inquistr_requirespanning_vs_trgt_pacbio_discrepancies.tsv",
+        # inquiSTR --require-spanning vs LongTR benchmark (ONT)
+        "tool_comparison/ont-inquistr-adotto-requirespanning.inq.gz",
+        "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont.tsv",
+        "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont.html",
+        "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont_discrepancies.tsv",
         expand("benchmarking/accuracy_{technology}.tsv", technology=TECHNOLOGIES),
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
@@ -147,7 +152,8 @@ rule all:
         expand("tool_comparison/inquistr_chr21_accuracy_{technology}.html", technology=TECHNOLOGIES),
         "tool_versions.txt",
         "straglr_version.txt",
-        "inquiSTR_version.txt"
+        "inquiSTR_version.txt",
+        "tool_comparison/metrics_summary.txt"
 
 rule straglr_chr21:
     """Target rule for the chr21 STRaglr vs inquiSTR runtime comparison subset."""
@@ -1140,6 +1146,65 @@ rule benchmark_inquistr_requirespanning_vs_trgt_pacbio:
         """
 
 
+rule inquiSTR_ont_requirespanning:
+    """Run inquiSTR call on ONT with --require-spanning to restrict genotypes to
+    loci fully covered by spanning reads, for direct comparison against LongTR."""
+    input:
+        catalog = "adotto_LongTR.bed",
+        ont = "ont.cram",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "tool_comparison/ont-inquistr-adotto-requirespanning.inq.gz"
+    log:
+        "logs/inquiSTR_ont_requirespanning.log"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    threads:
+        4
+    shell:
+        """
+        {params.inquiSTR} call {input.ont} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --noextend \
+            --require-spanning 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+
+rule benchmark_inquistr_requirespanning_vs_longtr_ont:
+    """Compare inquiSTR ONT --require-spanning genotypes against LongTR genotypes.
+    This isolates spanning-read-only calls to assess how much accuracy improves
+    when soft-clipped genotypes are excluded."""
+    input:
+        test = "tool_comparison/ont-inquistr-adotto-requirespanning.inq.gz",
+        truth = "tool_comparison/ont-longtr-adotto_rep1.inq.gz",
+    output:
+        txt = "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont.tsv",
+        plot = "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont.html",
+        diff_out = "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont_discrepancies.tsv"
+    params:
+        inquiSTR = inquiSTR,
+        max_locus = MAX_LOCUS,
+        tolerance = 3
+    log:
+        "logs/benchmark_inquistr_requirespanning_vs_longtr_ont.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --test {input.test} \
+            --truth {input.truth} \
+            --plot {output.plot} \
+            --diff-out {output.diff_out} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            > {output.txt} 2> {log}
+        """
+
+
 rule benchmark_inquistr_vs_longtr_pacbio:
     """
     Compare inquiSTR PacBio genotypes (--test) against LongTR PacBio genotypes converted to
@@ -1484,3 +1549,109 @@ rule benchmark_inquistr_chr21_accuracy:
             --max-locus {params.max_locus} \
             > {output.txt} 2> {log}
         """
+
+
+rule metrics_summary:
+    """Create a plain-text summary of speed differences and accuracy metrics."""
+    input:
+        runtimes = "tool_comparison/results.tsv",
+        adotto_pacbio = "benchmarking/accuracy_pacbio.tsv",
+        adotto_ont = "benchmarking/accuracy_ont.tsv",
+        trgt_pacbio = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
+        longtr_pacbio = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
+        longtr_ont = "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv"
+    output:
+        "tool_comparison/metrics_summary.txt"
+    run:
+        import re
+        import pandas as pd
+
+        def parse_accuracy_percentages(path):
+            with open(path, "r") as handle:
+                text = handle.read()
+
+            patterns = {
+                "within_3bp": r"Within\s+3\s+bp\s+tolerance:\s*\d+\s*\(([\d.]+)%\)",
+                "within_1bp": r"Maximally\s+off\s+by\s+one:\s*\d+\s*\(([\d.]+)%\)",
+                "exact": r"Exact\s+matches:\s*\d+\s*\(([\d.]+)%\)",
+            }
+
+            parsed = {}
+            for key, pattern in patterns.items():
+                match = re.search(pattern, text, flags=re.IGNORECASE)
+                if not match:
+                    raise ValueError(f"Could not parse '{key}' percentage from {path}")
+                parsed[key] = float(match.group(1))
+            return parsed
+
+        def fold_summary(mean_df, faster_tool, slower_tool):
+            techs = sorted(set(mean_df[mean_df["tool"] == faster_tool]["technology"]) &
+                           set(mean_df[mean_df["tool"] == slower_tool]["technology"]))
+
+            if not techs:
+                raise ValueError(f"No overlapping technologies for {faster_tool} and {slower_tool}")
+
+            folds = []
+            for tech in techs:
+                fast = mean_df[(mean_df["tool"] == faster_tool) & (mean_df["technology"] == tech)]["elapsed_seconds"].iloc[0]
+                slow = mean_df[(mean_df["tool"] == slower_tool) & (mean_df["technology"] == tech)]["elapsed_seconds"].iloc[0]
+                folds.append((tech, slow / fast))
+
+            mean_fold = sum(fold for _, fold in folds) / len(folds)
+            return mean_fold, folds
+
+        runtimes = pd.read_csv(input.runtimes, sep="\t")
+        mean_runtime = runtimes.groupby(["tool", "technology"], as_index=False)["elapsed_seconds"].mean()
+
+        mean_trgt_fold, trgt_folds = fold_summary(mean_runtime, "inquiSTR", "TRGT")
+        mean_longtr_fold, longtr_folds = fold_summary(mean_runtime, "inquiSTR", "LongTR")
+
+        rows = [
+            ("PacBio", "Adotto truth", parse_accuracy_percentages(input.adotto_pacbio)),
+            ("ONT", "Adotto truth", parse_accuracy_percentages(input.adotto_ont)),
+            ("PacBio", "TRGT", parse_accuracy_percentages(input.trgt_pacbio)),
+            ("PacBio", "LongTR", parse_accuracy_percentages(input.longtr_pacbio)),
+            ("ONT", "LongTR", parse_accuracy_percentages(input.longtr_ont)),
+        ]
+
+        headers = ["Technology", "Callset", "Within 3 bp", "Within 1 bp", "Exact matches"]
+        table_rows = []
+        for technology, callset, metrics in rows:
+            table_rows.append([
+                technology,
+                callset,
+                f"{metrics['within_3bp']:.2f}%",
+                f"{metrics['within_1bp']:.2f}%",
+                f"{metrics['exact']:.2f}%",
+            ])
+
+        col_widths = [len(h) for h in headers]
+        for row in table_rows:
+            for i, value in enumerate(row):
+                col_widths[i] = max(col_widths[i], len(value))
+
+        def format_row(values):
+            return " | ".join(value.ljust(col_widths[i]) for i, value in enumerate(values))
+
+        lines = []
+        lines.append("Metrics Summary")
+        lines.append("===============")
+        lines.append("")
+        lines.append("Mean speed differences")
+        lines.append("----------------------")
+        lines.append(f"inquiSTR vs TRGT: {mean_trgt_fold:.2f}x faster")
+        for tech, fold in trgt_folds:
+            lines.append(f"  {tech}: {fold:.2f}x")
+        lines.append(f"inquiSTR vs LongTR: {mean_longtr_fold:.2f}x faster")
+        for tech, fold in longtr_folds:
+            lines.append(f"  {tech}: {fold:.2f}x")
+        lines.append("")
+        lines.append("Accuracy table")
+        lines.append("--------------")
+        lines.append(format_row(headers))
+        lines.append("-+-".join("-" * width for width in col_widths))
+        for row in table_rows:
+            lines.append(format_row(row))
+
+        with open(output[0], "w") as out_handle:
+            out_handle.write("\n".join(lines) + "\n")
