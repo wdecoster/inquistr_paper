@@ -147,13 +147,16 @@ genotype_puretarget (per BAM, inquiSTR --preset pathogenic)
 straglr_version + inquiSTR_version → capture_tool_versions → tool_versions.txt
 metrics_summary → tool_comparison/metrics_summary.txt
   (speed fold-changes from results.tsv + accuracy %s parsed from the benchmark TSVs)
+metrics_accuracy → tool_comparison/metrics_accuracy.txt
+  (accuracy %s parsed from the benchmark TSVs only)
 ```
 
 ## Outputs
 
 Key paper artefacts are the HTML plots (`*_plot.html`, `*.html`), the aggregated `results.tsv` /
-`accuracy_*.tsv` tables, the relatedness/PCA tables, and `tool_comparison/metrics_summary.txt`
-(plain-text speed and accuracy summary). All timing files (`*.time`) are produced by
+`accuracy_*.tsv` tables, the relatedness/PCA tables, `tool_comparison/metrics_summary.txt`
+(plain-text speed and accuracy summary), and `tool_comparison/metrics_accuracy.txt`
+(plain-text accuracy-only summary). All timing files (`*.time`) are produced by
 `/usr/bin/time -v` and parsed for wall-clock seconds and peak RSS.
 
 ## Histogram GOLGA8A lengths

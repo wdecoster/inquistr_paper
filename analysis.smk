@@ -2,6 +2,7 @@ import pandas as pd
 import glob
 import os
 import random 
+import re
 
 # Include plotting rules from separate file
 include: "plotting.smk"
@@ -65,6 +66,65 @@ if os.path.exists("tool_versions.txt"):
 
 # pathogenic expansions to genotype are in /home/AD/wdecoster/inquiSTR_paper/puretarget-data and have to be globbed to a list and genotyped with inquiSTR --pathogenic
 puretarget_files = [os.path.basename(f).replace(".bam", "") for f in glob.glob("/home/AD/wdecoster/inquiSTR_paper/puretarget-data/*.bam")]
+
+
+def parse_accuracy_percentages(path):
+    with open(path, "r") as handle:
+        text = handle.read()
+
+    patterns = {
+        "within_3bp": r"Within\s+3\s+bp\s+tolerance:\s*\d+\s*\(([\d.]+)%\)",
+        "within_1bp": r"Maximally\s+off\s+by\s+one:\s*\d+\s*\(([\d.]+)%\)",
+        "exact": r"Exact\s+matches:\s*\d+\s*\(([\d.]+)%\)",
+    }
+
+    parsed = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            raise ValueError(f"Could not parse '{key}' percentage from {path}")
+        parsed[key] = float(match.group(1))
+    return parsed
+
+
+def render_accuracy_table(rows):
+    """Render the genotype-accuracy table as text lines.
+
+    `rows` is a list of (technology, test_set, truth_set, metrics) tuples, where metrics is
+    the dict from parse_accuracy_percentages. The test set is the caller being evaluated; the
+    truth set is either the adotto/GIAB HG002 truth or another caller.
+    """
+    headers = [
+        "Technology", "Test set", "Truth set", "Within 3 bp", "Within 1 bp", "Exact matches",
+    ]
+    table = [
+        [
+            technology,
+            test_set,
+            truth_set,
+            f"{metrics['within_3bp']:.2f}%",
+            f"{metrics['within_1bp']:.2f}%",
+            f"{metrics['exact']:.2f}%",
+        ]
+        for technology, test_set, truth_set, metrics in rows
+    ]
+    widths = [len(h) for h in headers]
+    for row in table:
+        for i, value in enumerate(row):
+            widths[i] = max(widths[i], len(value))
+
+    def fmt(values):
+        return " | ".join(value.ljust(widths[i]) for i, value in enumerate(values))
+
+    out = [
+        "Accuracy table",
+        "--------------",
+        fmt(headers),
+        "-+-".join("-" * width for width in widths),
+    ]
+    out.extend(fmt(row) for row in table)
+    return out
+
 
 rule all:
     input:
@@ -137,6 +197,11 @@ rule all:
         "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont.html",
         "tool_comparison/benchmark_inquistr_requirespanning_vs_longtr_ont_discrepancies.tsv",
         expand("benchmarking/accuracy_{technology}.tsv", technology=TECHNOLOGIES),
+        # TRGT and LongTR genotype accuracy vs the adotto/GIAB HG002 truth
+        "tool_comparison/trgt_accuracy_pacbio.tsv",
+        "tool_comparison/trgt_accuracy_pacbio.html",
+        expand("tool_comparison/longtr_accuracy_{technology}.tsv", technology=TECHNOLOGIES),
+        expand("tool_comparison/longtr_accuracy_{technology}.html", technology=TECHNOLOGIES),
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
         "tool_comparison/memory_plot.html",
@@ -177,6 +242,13 @@ rule versions:
     input:
         "tool_versions.txt",
         "straglr_version.txt"
+
+rule benchmark_callers:
+    input:
+        "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
+        "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
+        "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
+        "tool_comparison/metrics_accuracy.txt"
 
 rule straglr_version:
     """Capture STRaglr version using the STRaglr conda environment."""
@@ -903,7 +975,9 @@ rule LongTR_ont_filtered:
 
 rule convert_trgt_pacbio:
     """
-    TRGT coordinates should not be corrected between VCF and inquiSTR call format
+    Convert TRGT VCF to inquiSTR format. The genotyper is auto-detected from the VCF
+    header; TRGT coordinates (POS = catalog start) and allele lengths (AL field) are
+    handled accordingly.
     """
     input:
         vcf = "tool_comparison/pacbio-trgt-adotto_rep{replicate}.vcf.gz"
@@ -915,7 +989,7 @@ rule convert_trgt_pacbio:
         inquiSTR = inquiSTR
     shell:
         """
-        {params.inquiSTR} convert --off-by-one {input.vcf} 2> {log} | gzip > {output.inq}
+        {params.inquiSTR} convert {input.vcf} 2> {log} | gzip > {output.inq}
         """
 
 rule convert_longtr_pacbio:
@@ -929,7 +1003,7 @@ rule convert_longtr_pacbio:
         inquiSTR = inquiSTR
     shell:
         """
-        {params.inquiSTR} convert --off-by-one {input.vcf} 2> {log} | gzip > {output.inq}
+        {params.inquiSTR} convert {input.vcf} 2> {log} | gzip > {output.inq}
         """
 
 rule convert_longtr_ont:
@@ -943,7 +1017,7 @@ rule convert_longtr_ont:
         inquiSTR = inquiSTR
     shell:
         """
-        {params.inquiSTR} convert --off-by-one {input.vcf} 2> {log} | gzip > {output.inq}
+        {params.inquiSTR} convert {input.vcf} 2> {log} | gzip > {output.inq}
         """
 
 rule aggregate_tool_comparison:
@@ -1295,11 +1369,76 @@ rule inquiSTR_accuracy:
             > {output.txt} 2> {log}
         """
 
+
+rule trgt_accuracy:
+    """
+    Compare TRGT (PacBio) genotypes against the adotto/GIAB HG002 truth, mirroring
+    inquiSTR_accuracy. Uses the rep1 TRGT calls converted to inquiSTR format as --test.
+    """
+    input:
+        truth_bed = "/home/AD/wdecoster/optimize_inquiSTR/adotto/HG002_GRCh38_TandemRepeats_v1.0.bed.gz",
+        genotypes = "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/trgt_accuracy_pacbio.tsv",
+        plot = "tool_comparison/trgt_accuracy_pacbio.html"
+    params:
+        inquiSTR = inquiSTR,
+        tolerance = 3,
+        max_locus = MAX_LOCUS # limit to same length as used in genotyping
+    log:
+        "logs/trgt_accuracy_pacbio.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --truth {input.truth_bed} \
+            --mode MAX \
+            --tier1 \
+            --plot {output.plot} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            --test {input.genotypes} \
+            > {output.txt} 2> {log}
+        """
+
+
+rule longtr_accuracy:
+    """
+    Compare LongTR genotypes against the adotto/GIAB HG002 truth (both ONT and PacBio),
+    mirroring inquiSTR_accuracy. Uses the rep1 LongTR calls converted to inquiSTR format as --test.
+    """
+    input:
+        truth_bed = "/home/AD/wdecoster/optimize_inquiSTR/adotto/HG002_GRCh38_TandemRepeats_v1.0.bed.gz",
+        genotypes = "tool_comparison/{technology}-longtr-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/longtr_accuracy_{technology}.tsv",
+        plot = "tool_comparison/longtr_accuracy_{technology}.html"
+    params:
+        inquiSTR = inquiSTR,
+        tolerance = 3,
+        max_locus = MAX_LOCUS # limit to same length as used in genotyping
+    log:
+        "logs/longtr_accuracy_{technology}.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --truth {input.truth_bed} \
+            --mode MAX \
+            --tier1 \
+            --plot {output.plot} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            --test {input.genotypes} \
+            > {output.txt} 2> {log}
+        """
+
 rule pathogenic:
     input:
         inquistr = expand("puretarget-calls/{sample}.inq", sample=puretarget_files),
         combined = "puretarget-calls/combined.tsv",
         heatmap = "puretarget-calls/heatmap.html",
+        heatmap_png = "puretarget-calls/heatmap.png",
 
 rule combine_puretarget:
     input:
@@ -1559,30 +1698,15 @@ rule metrics_summary:
         adotto_ont = "benchmarking/accuracy_ont.tsv",
         trgt_pacbio = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
         longtr_pacbio = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
-        longtr_ont = "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv"
+        longtr_ont = "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
+        trgt_truth_pacbio = "tool_comparison/trgt_accuracy_pacbio.tsv",
+        longtr_truth_pacbio = "tool_comparison/longtr_accuracy_pacbio.tsv",
+        longtr_truth_ont = "tool_comparison/longtr_accuracy_ont.tsv"
     output:
         "tool_comparison/metrics_summary.txt"
     run:
         import re
         import pandas as pd
-
-        def parse_accuracy_percentages(path):
-            with open(path, "r") as handle:
-                text = handle.read()
-
-            patterns = {
-                "within_3bp": r"Within\s+3\s+bp\s+tolerance:\s*\d+\s*\(([\d.]+)%\)",
-                "within_1bp": r"Maximally\s+off\s+by\s+one:\s*\d+\s*\(([\d.]+)%\)",
-                "exact": r"Exact\s+matches:\s*\d+\s*\(([\d.]+)%\)",
-            }
-
-            parsed = {}
-            for key, pattern in patterns.items():
-                match = re.search(pattern, text, flags=re.IGNORECASE)
-                if not match:
-                    raise ValueError(f"Could not parse '{key}' percentage from {path}")
-                parsed[key] = float(match.group(1))
-            return parsed
 
         def fold_summary(mean_df, faster_tool, slower_tool):
             techs = sorted(set(mean_df[mean_df["tool"] == faster_tool]["technology"]) &
@@ -1606,32 +1730,17 @@ rule metrics_summary:
         mean_trgt_fold, trgt_folds = fold_summary(mean_runtime, "inquiSTR", "TRGT")
         mean_longtr_fold, longtr_folds = fold_summary(mean_runtime, "inquiSTR", "LongTR")
 
-        rows = [
-            ("PacBio", "Adotto truth", parse_accuracy_percentages(input.adotto_pacbio)),
-            ("ONT", "Adotto truth", parse_accuracy_percentages(input.adotto_ont)),
-            ("PacBio", "TRGT", parse_accuracy_percentages(input.trgt_pacbio)),
-            ("PacBio", "LongTR", parse_accuracy_percentages(input.longtr_pacbio)),
-            ("ONT", "LongTR", parse_accuracy_percentages(input.longtr_ont)),
+        # Test set = the caller being evaluated; truth set = adotto/GIAB or another caller.
+        accuracy_rows = [
+            ("PacBio", "inquiSTR", "adotto/GIAB", parse_accuracy_percentages(input.adotto_pacbio)),
+            ("ONT", "inquiSTR", "adotto/GIAB", parse_accuracy_percentages(input.adotto_ont)),
+            ("PacBio", "TRGT", "adotto/GIAB", parse_accuracy_percentages(input.trgt_truth_pacbio)),
+            ("PacBio", "LongTR", "adotto/GIAB", parse_accuracy_percentages(input.longtr_truth_pacbio)),
+            ("ONT", "LongTR", "adotto/GIAB", parse_accuracy_percentages(input.longtr_truth_ont)),
+            ("PacBio", "inquiSTR", "TRGT", parse_accuracy_percentages(input.trgt_pacbio)),
+            ("PacBio", "inquiSTR", "LongTR", parse_accuracy_percentages(input.longtr_pacbio)),
+            ("ONT", "inquiSTR", "LongTR", parse_accuracy_percentages(input.longtr_ont)),
         ]
-
-        headers = ["Technology", "Callset", "Within 3 bp", "Within 1 bp", "Exact matches"]
-        table_rows = []
-        for technology, callset, metrics in rows:
-            table_rows.append([
-                technology,
-                callset,
-                f"{metrics['within_3bp']:.2f}%",
-                f"{metrics['within_1bp']:.2f}%",
-                f"{metrics['exact']:.2f}%",
-            ])
-
-        col_widths = [len(h) for h in headers]
-        for row in table_rows:
-            for i, value in enumerate(row):
-                col_widths[i] = max(col_widths[i], len(value))
-
-        def format_row(values):
-            return " | ".join(value.ljust(col_widths[i]) for i, value in enumerate(values))
 
         lines = []
         lines.append("Metrics Summary")
@@ -1646,12 +1755,40 @@ rule metrics_summary:
         for tech, fold in longtr_folds:
             lines.append(f"  {tech}: {fold:.2f}x")
         lines.append("")
-        lines.append("Accuracy table")
-        lines.append("--------------")
-        lines.append(format_row(headers))
-        lines.append("-+-".join("-" * width for width in col_widths))
-        for row in table_rows:
-            lines.append(format_row(row))
+        lines.extend(render_accuracy_table(accuracy_rows))
+
+        with open(output[0], "w") as out_handle:
+            out_handle.write("\n".join(lines) + "\n")
+
+
+rule metrics_accuracy:
+    """Create a plain-text summary of accuracy metrics without runtime aggregation."""
+    input:
+        adotto_pacbio = "benchmarking/accuracy_pacbio.tsv",
+        adotto_ont = "benchmarking/accuracy_ont.tsv",
+        trgt_pacbio = "tool_comparison/benchmark_inquistr_vs_trgt_pacbio.tsv",
+        longtr_pacbio = "tool_comparison/benchmark_inquistr_vs_longtr_pacbio.tsv",
+        longtr_ont = "tool_comparison/benchmark_inquistr_vs_longtr_ont.tsv",
+        trgt_truth_pacbio = "tool_comparison/trgt_accuracy_pacbio.tsv",
+        longtr_truth_pacbio = "tool_comparison/longtr_accuracy_pacbio.tsv",
+        longtr_truth_ont = "tool_comparison/longtr_accuracy_ont.tsv"
+    output:
+        "tool_comparison/metrics_accuracy.txt"
+    run:
+        # Test set = the caller being evaluated; truth set = adotto/GIAB or another caller.
+        accuracy_rows = [
+            ("PacBio", "inquiSTR", "adotto/GIAB", parse_accuracy_percentages(input.adotto_pacbio)),
+            ("ONT", "inquiSTR", "adotto/GIAB", parse_accuracy_percentages(input.adotto_ont)),
+            ("PacBio", "TRGT", "adotto/GIAB", parse_accuracy_percentages(input.trgt_truth_pacbio)),
+            ("PacBio", "LongTR", "adotto/GIAB", parse_accuracy_percentages(input.longtr_truth_pacbio)),
+            ("ONT", "LongTR", "adotto/GIAB", parse_accuracy_percentages(input.longtr_truth_ont)),
+            ("PacBio", "inquiSTR", "TRGT", parse_accuracy_percentages(input.trgt_pacbio)),
+            ("PacBio", "inquiSTR", "LongTR", parse_accuracy_percentages(input.longtr_pacbio)),
+            ("ONT", "inquiSTR", "LongTR", parse_accuracy_percentages(input.longtr_ont)),
+        ]
+
+        lines = ["Accuracy Summary", "================", ""]
+        lines.extend(render_accuracy_table(accuracy_rows))
 
         with open(output[0], "w") as out_handle:
             out_handle.write("\n".join(lines) + "\n")

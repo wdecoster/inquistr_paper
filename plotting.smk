@@ -722,7 +722,8 @@ rule plot_puretarget_heatmap:
     input:
         combined = "puretarget-calls/combined.tsv"
     output:
-        "puretarget-calls/heatmap.html"
+        html = "puretarget-calls/heatmap.html",
+        png = "puretarget-calls/heatmap.png"
     run:
         import pandas as pd
         import plotly.graph_objects as go
@@ -885,7 +886,7 @@ rule plot_puretarget_heatmap:
             y=scaled.index.tolist(),
             text=cell_labels.values,
             texttemplate="%{text}",
-            textfont=dict(size=10, color='black'),
+            textfont=dict(size=13, color='black'),
             customdata=hover.values,
             hovertemplate="Sample: %{y}<br>Locus: %{x}<br>Length: %{customdata}<extra></extra>",
             colorscale=[[0, 'white'], [1, '#d62728']],
@@ -894,13 +895,14 @@ rule plot_puretarget_heatmap:
                 title=None,
                 orientation='h',
                 x=0.5,
-                y=-0.3,
+                y=-0.42,
                 xanchor='center',
                 yanchor='top',
                 tickvals=[0, 0.5, 1],
                 ticktext=['short', 'mid', 'long'],
-                tickfont=dict(size=14),
+                tickfont=dict(size=17),
                 len=0.8,
+                thickness=18,
             ),
             zmin=0, zmax=1,
         ))
@@ -908,26 +910,28 @@ rule plot_puretarget_heatmap:
         fig.update_layout(
             title='Pathogenic TR lengths',
             title_x=0.5,
-            title_font_size=22,
+            title_font_size=26,
             plot_bgcolor='white',
-            font=dict(size=14),
+            font=dict(size=17),
             xaxis=dict(
                 title='',
-                title_font_size=18,
-                tickfont=dict(size=14),
+                title_font_size=20,
+                tickfont=dict(size=18),
                 tickangle=45,
                 showgrid=False,
+                automargin=True,
             ),
             yaxis=dict(
                 title='',
-                title_font_size=18,
-                tickfont=dict(size=14),
+                title_font_size=20,
+                tickfont=dict(size=18),
                 showgrid=False,
                 autorange='reversed',
+                automargin=True,
             ),
-            margin=dict(l=0, b=0, t=50, r=0),
+            margin=dict(l=0, b=210, t=60, r=0),
             width=800,
-            height=400,
+            height=600,
         )
 
         # Draw boxes around the three sample groups
@@ -952,4 +956,7 @@ rule plot_puretarget_heatmap:
             fig.add_shape(type='rect', x0=idx_start - 0.5, x1=len(samples_list) - 0.5, y0=y0, y1=y1,
                           line=dict(color='black', width=2))
 
-        fig.write_html(output[0])
+        fig.write_html(output.html)
+        # High-resolution raster for publication: scale=4 renders at ~4x the on-screen
+        # pixel size (800x400 -> 3200x1600). Requires the kaleido package in the env.
+        fig.write_image(output.png, scale=4)
