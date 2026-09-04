@@ -422,6 +422,331 @@ rule plot_tool_comparison_memory:
         fig.write_html(output[0])
 
 
+rule plot_stratified_accuracy:
+    """Accuracy against the adotto/GIAB HG002 truth versus truth allele length.
+
+    Three rows over a shared set of length bins. The first two are the same measurement under a
+    fixed and an allele-scaled tolerance; they coincide up to 300 bp, so divergence beyond that
+    is the fixed 3 bp window tightening in relative terms rather than the genotypes degrading.
+    The third is the call rate, which separates dropout from miscalling.
+
+    The per-locus error distributions (`stratified_errors.tsv.gz`, with the p90/p99 columns in
+    the summary table) are deliberately not plotted here: they answer a different question than
+    the one this figure is for. The data is retained so the panel can be added back if needed.
+    """
+    input:
+        "tool_comparison/stratified_accuracy.tsv"
+    output:
+        "tool_comparison/stratified_accuracy.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        df = pd.read_csv(input[0], sep='\t')
+
+        # inquiSTR-spanning is computed in the tables but not plotted: it tracks inquiSTR so
+        # closely that it only hides the inquiSTR line. Compare the two in the TSV instead.
+        subplots = [
+            ('PacBio', 'pacbio', ['inquiSTR', 'TRGT', 'LongTR']),
+            ('ONT', 'ont', ['inquiSTR', 'LongTR']),
+        ]
+
+        tool_colors = {
+            'inquiSTR':          '#1f77b4',
+            'inquiSTR-spanning': '#9467bd',
+            'TRGT':              '#ff7f0e',
+            'LongTR':            '#2ca02c',
+        }
+        tool_labels = {'inquiSTR-spanning': 'inquiSTR (spanning reads only)'}
+
+        # (row title, column in the table, factor to reach a percentage)
+        rows = [
+            ('Within 3 bp (%)', 'within_tolerance_percent', 1),
+            ('Within 3 bp or 1% (%)', 'within_scaled_tolerance_percent', 1),
+            ('Loci genotyped (%)', 'call_rate', 100),
+        ]
+
+        # Bin order as written by the workflow, taken from the table itself
+        bins = list(dict.fromkeys(df['length_bin']))
+
+        fig = make_subplots(
+            rows=len(rows), cols=2,
+            subplot_titles=[s[0] for s in subplots] + [''] * (2 * (len(rows) - 1)),
+            shared_xaxes=True,
+            vertical_spacing=0.055,
+            horizontal_spacing=0.12,
+        )
+
+        tool_seen = set()
+        for col_i, (label, tech, tools) in enumerate(subplots, start=1):
+            tech_df = df[df['technology'] == tech]
+            for row_i, (row_title, column, scale) in enumerate(rows, start=1):
+                for tool in tools:
+                    tool_df = tech_df[tech_df['tool'] == tool].set_index('length_bin')
+                    if tool_df.empty:
+                        continue
+                    tool_df = tool_df.reindex(bins)
+
+                    fig.add_trace(go.Scatter(
+                        x=bins, y=tool_df[column] * scale,
+                        mode='lines+markers',
+                        name=tool_labels.get(tool, tool),
+                        line=dict(color=tool_colors[tool], width=3),
+                        marker=dict(color=tool_colors[tool], size=10,
+                                    line=dict(width=1, color='white')),
+                        legendgroup=tool,
+                        showlegend=(tool not in tool_seen),
+                    ), row=row_i, col=col_i)
+                    tool_seen.add(tool)
+
+        # Annotate each x tick with the number of catalog loci in that bin, which is the
+        # denominator every curve is computed over and is identical across tools
+        tick_text = {}
+        for label, tech, tools in subplots:
+            counts = (df[df['technology'] == tech]
+                      .groupby('length_bin')['n_targeted'].max())
+            tick_text[tech] = [f"{b}<br>n={int(counts.get(b, 0)):,}" for b in bins]
+
+        fig.update_layout(
+            title='Accuracy versus truth allele length (adotto/GIAB HG002)',
+            title_x=0.5,
+            plot_bgcolor='white',
+            font=dict(size=18),
+            title_font_size=24,
+            width=1200,
+            height=1100,
+            margin=dict(t=120, b=220, l=110),
+            legend=dict(orientation='h', yanchor='top', y=-0.14, xanchor='center', x=0.5),
+        )
+        for annotation in fig['layout']['annotations']:
+            annotation['font'] = dict(size=22)
+
+        # Panel letters, added after the loop above so they keep their own font. Each letter
+        # labels a whole row, since a row is one measurement shown for both technologies.
+        for row_i, letter in zip(range(1, len(rows) + 1), 'ABC'):
+            subplot = fig.get_subplot(row=row_i, col=1)
+            fig.add_annotation(
+                text=f'<b>{letter}</b>',
+                xref='paper', yref='paper',
+                x=subplot.xaxis.domain[0] - 0.085,
+                y=subplot.yaxis.domain[1] + 0.008,
+                xanchor='left', yanchor='bottom',
+                showarrow=False,
+                font=dict(size=26, color='black'),
+            )
+
+        axis_style = dict(showline=True, linewidth=2, linecolor='black')
+        for col_i, (label, tech, tools) in enumerate(subplots, start=1):
+            for row_i, (row_title, column, scale) in enumerate(rows, start=1):
+                is_last = row_i == len(rows)
+                fig.update_xaxes(
+                    tickmode='array',
+                    tickvals=bins,
+                    ticktext=tick_text[tech] if is_last else ['' for _ in bins],
+                    title_text='Truth allele length (bp)' if is_last else None,
+                    title_font_size=20, tickfont_size=14, showgrid=False,
+                    row=row_i, col=col_i, **axis_style,
+                )
+                fig.update_yaxes(
+                    title_text=row_title if col_i == 1 else None,
+                    title_font_size=16, tickfont_size=16, range=[0, 105],
+                    showgrid=True, gridcolor='lightgray', zeroline=False,
+                    row=row_i, col=col_i, **axis_style,
+                )
+
+        # The browser's "download plot as png" button exports at the on-screen size by
+        # default, which is too coarse for print. scale=3 gives 3600x3300 px.
+        fig.write_html(output[0], config={
+            'toImageButtonOptions': {
+                'format': 'png',
+                'filename': 'stratified_accuracy',
+                'scale': 3,
+            },
+        })
+
+
+rule plot_medaka_benchmark:
+    """Runtime and peak memory for the three ONT callers on the full adotto catalog.
+
+    Kept separate from the headline runtime/memory figures while medaka tandem is still being
+    evaluated; merge into plot_tool_comparison_time / _memory only if it joins the main
+    comparison.
+    """
+    input:
+        "tool_comparison/medaka_results.tsv"
+    output:
+        "tool_comparison/medaka_benchmark_plot.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        df = pd.read_csv(input[0], sep='\t')
+        df['elapsed_minutes'] = df['elapsed_seconds'] / 60
+
+        tool_colors = {
+            'inquiSTR':      '#1f77b4',
+            'LongTR':        '#2ca02c',
+            'medaka tandem': '#8c564b',
+        }
+        tools = [t for t in ['inquiSTR', 'LongTR', 'medaka tandem'] if t in df['tool'].values]
+        panels = [
+            ('Runtime', 'elapsed_minutes', 'Run time (minutes)', '{:.1f} min'),
+            ('Peak memory', 'max_memory_gb', 'Peak memory (GB)', '{:.1f} GB'),
+        ]
+
+        fig = make_subplots(rows=1, cols=2, subplot_titles=[p[0] for p in panels],
+                            horizontal_spacing=0.18)
+
+        for col_i, (title, column, y_title, fmt) in enumerate(panels, start=1):
+            for j, tool in enumerate(tools):
+                tool_df = df[df['tool'] == tool]
+                mean_val = tool_df[column].mean()
+
+                fig.add_trace(go.Bar(
+                    x=[j], y=[mean_val],
+                    marker_color=tool_colors[tool], opacity=0.8, width=0.6,
+                    text=[fmt.format(mean_val)], textposition='outside', textfont=dict(size=16),
+                    showlegend=False,
+                ), row=1, col=col_i)
+
+                # individual replicates on top of the mean, as in the other benchmark figures
+                fig.add_trace(go.Scatter(
+                    x=[j] * len(tool_df), y=tool_df[column],
+                    mode='markers',
+                    marker=dict(color=tool_colors[tool], size=11, opacity=0.6,
+                                line=dict(width=1, color='white')),
+                    showlegend=False,
+                ), row=1, col=col_i)
+
+        fig.update_layout(
+            title='ONT tool comparison: medaka tandem',
+            title_x=0.5,
+            plot_bgcolor='white',
+            font=dict(size=18),
+            title_font_size=24,
+            width=1000,
+            height=600,
+            margin=dict(t=110, b=120, l=90),
+        )
+        for annotation in fig['layout']['annotations']:
+            annotation['font'] = dict(size=20)
+
+        axis_style = dict(showline=True, linewidth=2, linecolor='black')
+        for col_i, (title, column, y_title, fmt) in enumerate(panels, start=1):
+            fig.update_xaxes(
+                tickmode='array', tickvals=list(range(len(tools))), ticktext=tools,
+                tickfont_size=16, showgrid=False, row=1, col=col_i, **axis_style,
+            )
+            fig.update_yaxes(
+                title_text=y_title, title_font_size=18, tickfont_size=16,
+                showgrid=True, gridcolor='lightgray', zeroline=False,
+                row=1, col=col_i, **axis_style,
+            )
+
+        fig.write_html(output[0], config={
+            'toImageButtonOptions': {
+                'format': 'png',
+                'filename': 'medaka_benchmark',
+                'scale': 3,
+            },
+        })
+
+
+rule plot_coverage_accuracy:
+    """Concordance against the adotto/GIAB HG002 truth as a function of ONT sequencing depth.
+
+    Two panels: the agreement metrics, and the number of loci actually genotyped. The second
+    matters because at low depth a locus can simply fail the read-support threshold, and
+    concordance is only computed over loci that produced a genotype.
+    """
+    input:
+        "coverage/accuracy_by_coverage.tsv"
+    output:
+        "coverage/accuracy_by_coverage.html"
+    run:
+        import pandas as pd
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        df = pd.read_csv(input[0], sep='\t').sort_values('coverage')
+
+        metrics = [
+            ('Exact match', 'exact_percent', '#1f77b4'),
+            ('Within 1 bp', 'within_1bp_percent', '#ff7f0e'),
+            ('Within 3 bp', 'within_3bp_percent', '#2ca02c'),
+        ]
+
+        fig = make_subplots(rows=1, cols=2, horizontal_spacing=0.14,
+                            subplot_titles=['Concordance with truth', 'Loci genotyped'])
+
+        for label, column, color in metrics:
+            fig.add_trace(go.Scatter(
+                x=df['coverage'], y=df[column],
+                mode='lines+markers', name=label,
+                line=dict(color=color, width=3),
+                marker=dict(color=color, size=10, line=dict(width=1, color='white')),
+            ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=df['coverage'], y=df['loci_assessed'],
+            mode='lines+markers', name='Loci assessed',
+            line=dict(color='#9467bd', width=3),
+            marker=dict(color='#9467bd', size=10, line=dict(width=1, color='white')),
+            showlegend=False,
+        ), row=1, col=2)
+
+        fig.update_layout(
+            title='Genotype concordance versus ONT coverage (HG002)',
+            title_x=0.5,
+            plot_bgcolor='white',
+            font=dict(size=18),
+            title_font_size=24,
+            width=1200,
+            height=600,
+            margin=dict(t=110, b=140, l=90),
+            legend=dict(orientation='h', yanchor='top', y=-0.18, xanchor='center', x=0.5),
+        )
+        for annotation in fig['layout']['annotations']:
+            annotation['font'] = dict(size=20)
+
+        # Panel letters, added after the loop above so they keep their own font
+        for col_i, letter in zip((1, 2), 'AB'):
+            subplot = fig.get_subplot(row=1, col=col_i)
+            fig.add_annotation(
+                text=f'<b>{letter}</b>',
+                xref='paper', yref='paper',
+                x=subplot.xaxis.domain[0] - 0.075,
+                y=subplot.yaxis.domain[1] + 0.06,
+                xanchor='left', yanchor='bottom',
+                showarrow=False,
+                font=dict(size=26, color='black'),
+            )
+
+        axis_style = dict(showline=True, linewidth=2, linecolor='black')
+        for col_i, y_title in enumerate(['Genotypes matching truth (%)', 'Loci assessed'], start=1):
+            fig.update_xaxes(
+                title_text='Coverage (x)', title_font_size=20, tickfont_size=16,
+                tickmode='array', tickvals=list(df['coverage']),
+                showgrid=False, row=1, col=col_i, **axis_style,
+            )
+            fig.update_yaxes(
+                title_text=y_title, title_font_size=18, tickfont_size=16,
+                showgrid=True, gridcolor='lightgray', zeroline=False,
+                row=1, col=col_i, **axis_style,
+            )
+        fig.update_yaxes(range=[0, 105], row=1, col=1)
+
+        fig.write_html(output[0], config={
+            'toImageButtonOptions': {
+                'format': 'png',
+                'filename': 'accuracy_by_coverage',
+                'scale': 3,
+            },
+        })
+
+
 rule plot_straglr_chr21_runtime:
     input:
         "tool_comparison/straglr_chr21_results.tsv"

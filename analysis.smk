@@ -49,12 +49,56 @@ inquiSTR = "/home/AD/wdecoster/repositories/inquiSTR/target/x86_64-unknown-linux
 TRGT = "/home/AD/wdecoster/bin/trgt",
 LongTR = "/home/AD/wdecoster/anaconda3/envs/longtr/bin/LongTR"
 STRAGLR = "/home/AD/wdecoster/repositories/straglr/straglr.py" # requires environment with straglr dependencies
+# medaka tandem, ONT only. Assumed to be on PATH; point this at an absolute path, or add a
+# conda directive to the medaka rules the way the STRaglr rules use envs/straglr.yml, if it
+# lives in its own environment. medaka tandem additionally needs pyabpoa installed, which the
+# medaka wheel does not pull in: without it the default `hybrid` phasing cannot fall back to
+# abPOA clustering for loci where haplotags are insufficient.
+MEDAKA = "medaka"
+# Leave empty to use medaka's default consensus model, or set the model matching the basecaller
+# used for the ONT reads (e.g. "dna_r10.4.1_e8.2_400bps_hac@v4.1.0:consensus").
+MEDAKA_MODEL = ""
 
 # Benchmark parameters
 TECHNOLOGIES = ["ont", "pacbio"]
 THREAD_COUNTS = list(range(1, 13))  # 1 to 12 threads
 REPLICATES = list(range(1,6))  # 5 replicates
 MAX_LOCUS = 10000  # limit to loci shorter than 10kb for genotyping
+
+# Truth set used for all accuracy benchmarking: the adotto/GIAB HG002 tandem repeat benchmark
+ADOTTO_TRUTH = "/home/AD/wdecoster/optimize_inquiSTR/adotto/HG002_GRCh38_TandemRepeats_v1.0.bed.gz"
+
+# Length-stratified accuracy analysis: the call set representing each tool per technology.
+# rep1 is representative, since accuracy does not depend on the replicate. The TRGT/LongTR
+# call sets are their VCFs converted to inquiSTR format, so every tool is evaluated through
+# exactly the same code. All of these were genotyped from the same adotto catalog
+# coordinates, which keeps the per-length-bin locus sets identical across tools.
+STRATIFIED_CALLSETS = {
+    ("pacbio", "inquiSTR"): "tool_comparison/pacbio-inquistr-adotto_rep1.inq.gz",
+    ("ont", "inquiSTR"): "tool_comparison/ont-inquistr-adotto_rep1.inq.gz",
+    ("pacbio", "inquiSTR-spanning"): "tool_comparison/pacbio-inquistr-adotto-requirespanning.inq.gz",
+    ("ont", "inquiSTR-spanning"): "tool_comparison/ont-inquistr-adotto-requirespanning.inq.gz",
+    ("pacbio", "TRGT"): "tool_comparison/pacbio-trgt-adotto_rep1.inq.gz",
+    ("pacbio", "LongTR"): "tool_comparison/pacbio-longtr-adotto_rep1.inq.gz",
+    ("ont", "LongTR"): "tool_comparison/ont-longtr-adotto_rep1.inq.gz",
+}
+
+# Lower edges (bp) of the truth allele length bins; the last bin is open-ended
+LENGTH_BIN_EDGES = [0, 100, 200, 500, 1000, 2000, 5000]
+
+# Coverage titration. This HG002 ONT alignment is deeper than the downsampled `ont.cram` used
+# elsewhere in the paper; ONT_FULL_COVERAGE is its approximate depth and sets the subsampling
+# fractions, so correct it here if the estimate changes.
+ONT_FULL_CRAM = "/home/AD/wdecoster/optimize_inquiSTR/benchmark/hg002_ont/ont.cram"
+ONT_FULL_COVERAGE = 50
+# 7.5x is included because the loci-genotyped curve does nearly all of its rising between
+# 5x and 10x, so that interval is the one worth resolving.
+COVERAGE_LEVELS = [5, 7.5] + list(range(10, ONT_FULL_COVERAGE + 1, 5))
+
+
+def coverage_label(value):
+    """Filename-safe label for a coverage level: 5 -> "5", 7.5 -> "7.5"."""
+    return f"{value:g}"
 
 # Randomize order of thread counts for benchmarking
 THREAD_ORDER = THREAD_COUNTS * len(REPLICATES)
@@ -85,6 +129,150 @@ def parse_accuracy_percentages(path):
             raise ValueError(f"Could not parse '{key}' percentage from {path}")
         parsed[key] = float(match.group(1))
     return parsed
+
+
+def length_bin_labels(edges=None):
+    """Labels for the truth allele length bins defined by `edges` (lower edges, bp).
+
+    The final bin is open-ended, e.g. [0, 100, 200] -> ["0-100", "100-200", ">200"].
+    """
+    edges = LENGTH_BIN_EDGES if edges is None else edges
+    labels = [f"{low}-{high}" for low, high in zip(edges, edges[1:])]
+    labels.append(f">{edges[-1]}")
+    return labels
+
+
+def load_truth_alleles(bed_path, max_locus, mode="MAX"):
+    """Load the adotto/GIAB HG002 truth BED the way `inquiSTR benchmark` does.
+
+    The BED has 9 columns: column 4 holds the tier and the last two columns hold the
+    per-haplotype length difference relative to the reference, with the opposite sign
+    convention from inquiSTR (hence the negation). Only Tier1 loci are kept and loci
+    with a reference span above `max_locus` are dropped, mirroring `--tier1 --max-locus`.
+
+    Returns a DataFrame with the selected truth allele (MAX or MIN of both haplotypes,
+    in bp relative to the reference) and its absolute length, i.e. the reference span
+    plus that difference. The absolute length is what the stratification bins on.
+    """
+    import pandas as pd
+
+    truth = pd.read_csv(bed_path, sep="\t", header=None, usecols=[0, 1, 2, 3, 7, 8])
+    truth.columns = ["chromosome", "begin", "end", "tier", "h1", "h2"]
+    truth[["h1", "h2"]] = -truth[["h1", "h2"]]
+    truth = truth[(truth["tier"] == "Tier1") & (truth["end"] - truth["begin"] <= max_locus)]
+
+    alleles = truth[["h1", "h2"]]
+    truth["truth_allele"] = alleles.max(axis=1) if mode == "MAX" else alleles.min(axis=1)
+    truth = truth.dropna(subset=["truth_allele"])
+    truth["truth_length"] = ((truth["end"] - truth["begin"]) + truth["truth_allele"]).clip(lower=0)
+    return truth[["chromosome", "begin", "end", "truth_allele", "truth_length"]]
+
+
+def load_catalog_keys(catalog_path):
+    """Load the `chromosome:begin` keys of the catalog the tools were asked to genotype.
+
+    The adotto truth set covers roughly 1.6M Tier1 loci while the calling catalog holds
+    ~0.9M, and only ~11% share a start coordinate. Truth loci with no catalog entry were
+    never presented to any tool, so they have to be excluded from the call-rate denominator
+    or every tool looks like it drops ~90% of loci. The two ONT catalogs
+    (`adotto_TRGT.bed.gz`, `adotto_LongTR.bed`) carry identical coordinates and differ only
+    in the fourth column, so one catalog serves every call set.
+    """
+    import pandas as pd
+
+    catalog = pd.read_csv(catalog_path, sep="\t", header=None, usecols=[0, 1], comment="#")
+    catalog.columns = ["chromosome", "begin"]
+    return pd.MultiIndex.from_arrays([catalog["chromosome"], catalog["begin"]])
+
+
+def load_call_alleles(call_path, mode="MAX"):
+    """Load an inquiSTR individual call file (`.inq`, optionally gzipped) and reduce each
+    locus to a single allele (MAX or MIN of both haplotypes), as `inquiSTR benchmark` does.
+
+    TRGT and LongTR calls are converted to this format first, so the same loader serves
+    every tool. Loci without a genotype keep their NaN and are counted as not called.
+    """
+    import gzip
+    import pandas as pd
+
+    opener = gzip.open if str(call_path).endswith(".gz") else open
+    metadata_lines = 0
+    with opener(call_path, "rt") as handle:
+        for line in handle:
+            if not line.startswith("#"):
+                break
+            metadata_lines += 1
+
+    calls = pd.read_csv(call_path, sep="\t", skiprows=metadata_lines, usecols=[0, 1, 2, 4, 5])
+    calls.columns = ["chromosome", "begin", "end", "h1", "h2"]
+    alleles = calls[["h1", "h2"]]
+    calls["call"] = alleles.max(axis=1) if mode == "MAX" else alleles.min(axis=1)
+    # keep="last" mirrors the HashMap insertion order of `inquiSTR benchmark`
+    calls = calls.drop_duplicates(subset=["chromosome", "begin"], keep="last")
+    return calls[["chromosome", "begin", "call"]]
+
+
+def medaka_vcf_to_inquistr(vcf_path, out_path, sample_name="medaka"):
+    """Convert a medaka tandem VCF (`medaka_to_ref.TR.vcf`) to inquiSTR individual-call format.
+
+    medaka reports the whole haplotype-specific repeat sequence as the alternate allele, so an
+    allele length is the length of the sequence its genotype points at and the inquiSTR value is
+    that minus the reference span (positive = expansion). Three cases need care:
+
+    * `<DEL>` is medaka's symbolic allele for a haplotype in which the repeat is entirely absent,
+      so its length is 0 and the value is -len(REF), not len("<DEL>"). It appears both as the
+      only alternate and as one of several.
+    * A missing genotype allele (`.`) becomes NaN, which inquiSTR reads as uncalled.
+    * A haploid genotype (one allele, e.g. chrX in a male sample) fills H1 and leaves H2 NaN,
+      matching what `inquiSTR call` writes for haploid chromosomes.
+
+    Loci medaka omits, including the >10 kb repeats it lists in `skipped_large.bed`, simply do
+    not appear and count as uncalled in the benchmark. `POS - 1` and `len(REF)` reproduce the
+    catalog interval exactly, which is what `inquiSTR benchmark` matches on.
+    """
+    import gzip
+
+    opener = gzip.open if str(vcf_path).endswith(".gz") else open
+    out_opener = gzip.open if str(out_path).endswith(".gz") else open
+
+    with opener(vcf_path, "rt") as handle, out_opener(out_path, "wt") as out:
+        out.write("chromosome\tbegin\tend\tinfo\t{0}_H1\t{0}_H2\n".format(sample_name))
+        for line in handle:
+            if line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            chromosome, pos, ref, alt, fmt, sample = (
+                fields[0], int(fields[1]), fields[3], fields[4], fields[8], fields[9]
+            )
+
+            genotype = dict(zip(fmt.split(":"), sample.split(":"))).get("GT", ".")
+            alleles = [ref] + ([] if alt == "." else alt.split(","))
+
+            values = []
+            for call in genotype.replace("|", "/").split("/"):
+                if not call.isdigit() or int(call) >= len(alleles):
+                    values.append("NaN")
+                    continue
+                sequence = alleles[int(call)]
+                length = 0 if sequence == "<DEL>" else len(sequence)
+                values.append(f"{length - len(ref):.1f}")
+
+            while len(values) < 2:
+                values.append("NaN")
+
+            begin = pos - 1
+            out.write(
+                f"{chromosome}\t{begin}\t{begin + len(ref)}\t.\t{values[0]}\t{values[1]}\n"
+            )
+
+
+def parse_loci_assessed(path):
+    """Number of loci matched between the call set and the truth, from a benchmark output."""
+    with open(path, "r") as handle:
+        match = re.search(r"^LOCI_ASSESSED:\s*(\d+)", handle.read(), flags=re.MULTILINE)
+    if not match:
+        raise ValueError(f"Could not parse LOCI_ASSESSED from {path}")
+    return int(match.group(1))
 
 
 def render_accuracy_table(rows):
@@ -202,6 +390,13 @@ rule all:
         "tool_comparison/trgt_accuracy_pacbio.html",
         expand("tool_comparison/longtr_accuracy_{technology}.tsv", technology=TECHNOLOGIES),
         expand("tool_comparison/longtr_accuracy_{technology}.html", technology=TECHNOLOGIES),
+        # genotype accuracy stratified by truth allele length
+        "tool_comparison/stratified_accuracy.tsv",
+        "tool_comparison/stratified_accuracy.html",
+        "tool_comparison/stratified_errors.tsv.gz",
+        # genotype accuracy versus ONT sequencing depth
+        "coverage/accuracy_by_coverage.tsv",
+        "coverage/accuracy_by_coverage.html",
         "tool_comparison/results.tsv",
         "tool_comparison/runtime_plot.html",
         "tool_comparison/memory_plot.html",
@@ -1433,6 +1628,291 @@ rule longtr_accuracy:
             > {output.txt} 2> {log}
         """
 
+rule stratify_accuracy_by_length:
+    """Accuracy against the adotto/GIAB HG002 truth, stratified by truth allele length.
+
+    Answers whether genotyping accuracy degrades for long repeat alleles, and reports the
+    call rate per length bin so that dropout (loci the tool leaves uncalled) is separated
+    from miscalling. The `inquiSTR-spanning` call sets are `inquiSTR call --require-spanning`,
+    which excludes genotypes derived from soft-clipped reads, isolating that contribution.
+
+    Two tolerances are scored: the fixed 3 bp used elsewhere in the paper, and one that
+    scales with the allele (3 bp or 1% of the truth allele length, whichever is larger).
+    A fixed 3 bp window demands 0.06% accuracy on a 5 kb allele but 6% on a 50 bp one, so
+    the pair separates a genuine length effect from the tolerance simply getting stricter.
+    """
+    input:
+        truth_bed = ADOTTO_TRUTH,
+        catalog = "adotto_TRGT.bed.gz",
+        genotypes = lambda wildcards: STRATIFIED_CALLSETS[(wildcards.technology, wildcards.tool)]
+    output:
+        tsv = "tool_comparison/stratified_accuracy/{technology}-{tool}.tsv",
+        errors = "tool_comparison/stratified_errors/{technology}-{tool}.tsv.gz"
+    wildcard_constraints:
+        technology = "|".join(TECHNOLOGIES),
+        # longest first so that e.g. "inquiSTR-spanning" is not truncated to "inquiSTR"
+        tool = "|".join(sorted({tool for _, tool in STRATIFIED_CALLSETS}, key=lambda t: (-len(t), t)))
+    params:
+        tolerance = 3,
+        relative_tolerance = 0.01,
+        max_locus = MAX_LOCUS,
+        edges = LENGTH_BIN_EDGES
+    run:
+        import numpy as np
+        import pandas as pd
+
+        truth = load_truth_alleles(input.truth_bed, params.max_locus)
+        calls = load_call_alleles(input.genotypes)
+
+        # Left join: truth loci absent from the call set (or called NaN) count as not called
+        merged = truth.merge(calls, on=["chromosome", "begin"], how="left")
+        merged["abs_error"] = (merged["call"] - merged["truth_allele"]).abs()
+
+        # Only truth loci that are in the calling catalog were ever presented to a tool;
+        # the rest cannot be called by anyone and must stay out of the call-rate denominator
+        catalog_keys = load_catalog_keys(input.catalog)
+        merged["targeted"] = pd.MultiIndex.from_arrays(
+            [merged["chromosome"], merged["begin"]]
+        ).isin(catalog_keys)
+
+        # Tolerance that scales with the allele, floored at the fixed tolerance
+        scaled_tolerance = np.maximum(
+            params.tolerance, params.relative_tolerance * merged["truth_length"]
+        )
+
+        labels = length_bin_labels(params.edges)
+        merged["length_bin"] = pd.cut(
+            merged["truth_length"],
+            bins=params.edges + [np.inf],
+            right=False,
+            labels=labels,
+        )
+        merged["within_scaled"] = merged["abs_error"] <= scaled_tolerance
+
+        rows = []
+        for label in labels:
+            binned = merged[merged["length_bin"] == label]
+            targeted = binned[binned["targeted"]]
+            called = targeted.dropna(subset=["call"])
+            n_truth = len(binned)
+            n_targeted = len(targeted)
+            n_called = len(called)
+            errors = called["abs_error"]
+
+            exact = int((errors == 0).sum())
+            within_1bp = int((errors <= 1).sum())
+            within_tolerance = int((errors <= params.tolerance).sum())
+            within_scaled = int(called["within_scaled"].sum())
+
+            def percent(count):
+                return 100 * count / n_called if n_called else float("nan")
+
+            rows.append({
+                "technology": wildcards.technology,
+                "tool": wildcards.tool,
+                "length_bin": label,
+                "n_truth": n_truth,
+                "n_targeted": n_targeted,
+                "catalog_coverage": n_targeted / n_truth if n_truth else float("nan"),
+                "n_called": n_called,
+                "call_rate": n_called / n_targeted if n_targeted else float("nan"),
+                "exact": exact,
+                "exact_percent": percent(exact),
+                "within_1bp": within_1bp,
+                "within_1bp_percent": percent(within_1bp),
+                "within_tolerance": within_tolerance,
+                "within_tolerance_percent": percent(within_tolerance),
+                "within_scaled_tolerance": within_scaled,
+                "within_scaled_tolerance_percent": percent(within_scaled),
+                "tolerance_bp": params.tolerance,
+                "relative_tolerance": params.relative_tolerance,
+                "median_abs_error": errors.median() if n_called else float("nan"),
+                "mean_abs_error": errors.mean() if n_called else float("nan"),
+                # Quantiles of the absolute error. Unlike the mean these are not dragged by a
+                # handful of extreme misses, and unlike the range of the error distribution
+                # they do not grow simply because a bin holds more loci - the bins span
+                # 142,330 down to 27 loci, so only an n-robust statistic can be compared
+                # across them.
+                "p90_abs_error": errors.quantile(0.90) if n_called else float("nan"),
+                "p99_abs_error": errors.quantile(0.99) if n_called else float("nan"),
+                "pearson_r": called["call"].corr(called["truth_allele"]) if n_called > 2 else float("nan"),
+            })
+
+        pd.DataFrame(rows).to_csv(output.tsv, sep="\t", index=False, float_format="%.4f")
+
+        # Per-locus signed errors, for the error-distribution panel and as supplementary data.
+        # Signed rather than absolute: under-calling a long allele and over-calling one are
+        # different failures, and only the signed value distinguishes them. Every genotyped
+        # locus is written; the figure subsamples the dense bins, this file does not.
+        errors = merged[merged["targeted"] & merged["call"].notna()].copy()
+        errors["error"] = errors["call"] - errors["truth_allele"]
+        errors["technology"] = wildcards.technology
+        errors["tool"] = wildcards.tool
+        errors[[
+            "technology", "tool", "chromosome", "begin", "length_bin",
+            "truth_length", "truth_allele", "call", "error",
+        ]].to_csv(output.errors, sep="\t", index=False)
+
+
+rule combine_stratified_accuracy:
+    """Concatenate the per-tool length-stratified accuracy tables into one long-format table."""
+    input:
+        expand("tool_comparison/stratified_accuracy/{technology}-{tool}.tsv",
+               zip,
+               technology=[technology for technology, _ in STRATIFIED_CALLSETS],
+               tool=[tool for _, tool in STRATIFIED_CALLSETS])
+    output:
+        "tool_comparison/stratified_accuracy.tsv"
+    run:
+        import pandas as pd
+
+        combined = pd.concat([pd.read_csv(path, sep="\t") for path in input], ignore_index=True)
+        combined.to_csv(output[0], sep="\t", index=False)
+
+
+rule combine_stratified_errors:
+    """Concatenate the per-tool, per-locus genotype errors into one long-format table."""
+    input:
+        expand("tool_comparison/stratified_errors/{technology}-{tool}.tsv.gz",
+               zip,
+               technology=[technology for technology, _ in STRATIFIED_CALLSETS],
+               tool=[tool for _, tool in STRATIFIED_CALLSETS])
+    output:
+        "tool_comparison/stratified_errors.tsv.gz"
+    run:
+        import pandas as pd
+
+        combined = pd.concat([pd.read_csv(path, sep="\t") for path in input], ignore_index=True)
+        combined.to_csv(output[0], sep="\t", index=False)
+
+
+rule stratified_accuracy:
+    """Target rule for the accuracy-versus-truth-allele-length analysis."""
+    input:
+        "tool_comparison/stratified_accuracy.tsv",
+        "tool_comparison/stratified_accuracy.html",
+        "tool_comparison/stratified_errors.tsv.gz"
+
+
+rule downsample_ont_coverage:
+    """Subsample the deep HG002 ONT alignment to a target coverage.
+
+    The fraction is the target divided by ONT_FULL_COVERAGE, so the levels are nominal depths
+    based on that estimate rather than measured ones. The seed is fixed so reruns reproduce the
+    same read subset. Outputs are temporary: the ten levels together hold ~5.5x the reads of the
+    source file, and only the genotypes are needed afterwards.
+    """
+    input:
+        cram = ONT_FULL_CRAM
+    output:
+        cram = temp("coverage/ont_{coverage}x.cram"),
+        crai = temp("coverage/ont_{coverage}x.cram.crai")
+    params:
+        reference = reference,
+        fraction = lambda wildcards: float(wildcards.coverage) / ONT_FULL_COVERAGE,
+        seed = 42
+    wildcard_constraints:
+        coverage = r"\d+(\.\d+)?"
+    threads: 4
+    conda:
+        "envs/minimap2.yml" # also includes samtools
+    log:
+        "logs/downsample_ont_{coverage}x.log"
+    shell:
+        """
+        samtools view -C -T {params.reference} \
+            --subsample {params.fraction} --subsample-seed {params.seed} \
+            --threads {threads} -o {output.cram} {input.cram} 2> {log}
+        samtools index {output.cram} 2>> {log}
+        """
+
+
+rule call_ont_coverage:
+    """Genotype one downsampled ONT alignment, with the same settings as the main ONT run."""
+    input:
+        cram = "coverage/ont_{coverage}x.cram",
+        crai = "coverage/ont_{coverage}x.cram.crai",
+        catalog = "adotto_TRGT.bed.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        inq = "coverage/ont_{coverage}x.inq.gz"
+    params:
+        inquiSTR = inquiSTR,
+        reference = reference,
+        max_locus = MAX_LOCUS
+    threads:
+        4
+    log:
+        "logs/call_ont_{coverage}x.log"
+    shell:
+        """
+        {params.inquiSTR} call {input.cram} \
+            --region-file {input.catalog} \
+            --threads {threads} \
+            --reference {params.reference} \
+            --max-locus {params.max_locus} \
+            --noextend 2> {log} | gzip > {output.inq} 2>> {log}
+        """
+
+
+rule benchmark_ont_coverage:
+    """Score one coverage level against the adotto/GIAB HG002 truth."""
+    input:
+        truth_bed = ADOTTO_TRUTH,
+        genotypes = "coverage/ont_{coverage}x.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "coverage/accuracy_{coverage}x.tsv"
+    params:
+        inquiSTR = inquiSTR,
+        tolerance = 3,
+        max_locus = MAX_LOCUS
+    log:
+        "logs/benchmark_ont_{coverage}x.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --truth {input.truth_bed} \
+            --mode MAX \
+            --tier1 \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            --test {input.genotypes} \
+            > {output.txt} 2> {log}
+        """
+
+
+rule aggregate_coverage_accuracy:
+    """Collect the per-coverage benchmark outputs into one table."""
+    input:
+        expand("coverage/accuracy_{coverage}x.tsv",
+               coverage=[coverage_label(c) for c in COVERAGE_LEVELS])
+    output:
+        "coverage/accuracy_by_coverage.tsv"
+    run:
+        import pandas as pd
+
+        rows = []
+        for coverage, path in zip(COVERAGE_LEVELS, input):
+            metrics = parse_accuracy_percentages(path)
+            rows.append({
+                "coverage": coverage,
+                "loci_assessed": parse_loci_assessed(path),
+                "exact_percent": metrics["exact"],
+                "within_1bp_percent": metrics["within_1bp"],
+                "within_3bp_percent": metrics["within_3bp"],
+            })
+
+        pd.DataFrame(rows).to_csv(output[0], sep="\t", index=False)
+
+
+rule coverage_titration:
+    """Target rule for the concordance-versus-coverage analysis."""
+    input:
+        "coverage/accuracy_by_coverage.tsv",
+        "coverage/accuracy_by_coverage.html"
+
+
 rule pathogenic:
     input:
         inquistr = expand("puretarget-calls/{sample}.inq", sample=puretarget_files),
@@ -1688,6 +2168,242 @@ rule benchmark_inquistr_chr21_accuracy:
             --max-locus {params.max_locus} \
             > {output.txt} 2> {log}
         """
+
+
+# ---------------------------------------------------------------------------------------------
+# medaka tandem (ONT only), kept separate from the headline comparison for now
+#
+# Requested by a reviewer as a stronger ONT alternative to LongTR. Handled the same way STRaglr
+# was: its own run, its own aggregation and its own plots, so the metrics can be inspected before
+# deciding whether medaka tandem joins the main figures or stays a separate comparison.
+#
+# Two decisions worth revisiting, both flagged because they affect how favourably medaka is
+# judged in a comparison a reviewer asked for:
+#
+#   1. MEDAKA_MODEL is empty, so medaka uses its default consensus model. If the HG002 ONT reads
+#      were basecalled with a different model, medaka's consensus - and therefore its accuracy -
+#      is understated. Set MEDAKA_MODEL to the matching model, or add `--auto_model consensus`
+#      pointed at the CRAM, once the basecaller version is known.
+#   2. medaka skips repeats whose estimated allele length exceeds 10 kb unless
+#      `--process_large_regions` is given, listing them in `skipped_large.bed`. inquiSTR's
+#      --max-locus instead filters on *reference span*, so medaka will drop some loci inquiSTR
+#      calls. The default is kept because the alternative costs 14-23 GB of RAM, which would
+#      distort the memory benchmark; the skipped count is recoverable from skipped_large.bed.
+# ---------------------------------------------------------------------------------------------
+
+rule run_medaka_tandem:
+    """Genotype the ONT alignment with medaka tandem, timed like the other callers.
+
+    CLI is `medaka tandem <bam> <ref> <regions.bed> <sex> <outdir>`; the sample sex is a required
+    positional and HG002 is male. medaka reads the bgzipped adotto catalog directly, using only
+    its first three columns. Results land in `<outdir>/medaka_to_ref.TR.vcf`.
+
+    Requires medaka 2.2.1 or newer, the release that added both CRAM input and gzipped BED
+    regions to the tandem subcommand. Older versions cannot pass a reference to htslib and fail
+    every region with `[E::cram_next_slice] Failure to decode slice` followed by
+    `Retrieved too few reads (0 < 3)`, surfacing at the end as
+    `Medaka failed to generate a consensus sequence for the input regions`.
+    """
+    input:
+        catalog = "adotto_TRGT.bed.gz",
+        ont = "ont.cram",
+    output:
+        vcf = "tool_comparison/medaka_rep{replicate}/medaka_to_ref.TR.vcf",
+        timing = "tool_comparison/ont-medaka-adotto_rep{replicate}.time"
+    log:
+        "logs/medaka_tandem_rep{replicate}.log"
+    params:
+        medaka = MEDAKA,
+        reference = reference,
+        sex = "male",  # HG002
+        model = f"--model {MEDAKA_MODEL}" if MEDAKA_MODEL else ""
+    threads:
+        4
+    conda:
+        "/home/AD/wdecoster/inquiSTR_paper/envs/medaka.yml"
+    resources:
+        benchmark_slot=1  # Ensure only one benchmark runs at a time
+    shell:
+        """
+        outdir=$(dirname {output.vcf})
+        rm -rf "$outdir"
+        /usr/bin/time -v -o {output.timing} \
+        {params.medaka} tandem {params.model} \
+            --workers {threads} \
+            --sample_name medaka \
+            {input.ont} \
+            {params.reference} \
+            {input.catalog} \
+            {params.sex} \
+            "$outdir" &> {log}
+        """
+
+
+rule convert_medaka_to_inquistr_format:
+    """Convert the medaka tandem VCF to inquiSTR format for benchmarking."""
+    input:
+        vcf = "tool_comparison/medaka_rep{replicate}/medaka_to_ref.TR.vcf"
+    output:
+        inq = "tool_comparison/ont-medaka-adotto_rep{replicate}.inq.gz"
+    run:
+        medaka_vcf_to_inquistr(input.vcf, output.inq)
+
+
+rule medaka_version:
+    """Capture the medaka version alongside the other tool versions."""
+    output:
+        "medaka_version.txt"
+    params:
+        medaka = MEDAKA
+    log:
+        "logs/medaka_version.log"
+    conda:
+        "/home/AD/wdecoster/inquiSTR_paper/envs/medaka.yml"
+    shell:
+        """
+        {params.medaka} --version > {output} 2> {log}
+        """
+
+
+rule medaka_accuracy_ont:
+    """Compare medaka tandem genotypes against the adotto/GIAB HG002 truth.
+
+    Mirrors longtr_accuracy so the two ONT callers are scored identically.
+    """
+    input:
+        truth_bed = ADOTTO_TRUTH,
+        genotypes = "tool_comparison/ont-medaka-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/medaka_accuracy_ont.tsv",
+        plot = "tool_comparison/medaka_accuracy_ont.html"
+    params:
+        inquiSTR = inquiSTR,
+        tolerance = 3,
+        max_locus = MAX_LOCUS
+    log:
+        "logs/medaka_accuracy_ont.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --truth {input.truth_bed} \
+            --mode MAX \
+            --tier1 \
+            --plot {output.plot} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            --test {input.genotypes} \
+            > {output.txt} 2> {log}
+        """
+
+
+rule benchmark_inquistr_vs_medaka_ont:
+    """Concordance between inquiSTR and medaka tandem genotypes on ONT.
+
+    Mirrors benchmark_inquistr_vs_longtr_ont: medaka is passed as the truth set, so the
+    percentages describe agreement between the two callers rather than accuracy.
+    """
+    input:
+        test = "tool_comparison/ont-inquistr-adotto_rep1.inq.gz",
+        truth = "tool_comparison/ont-medaka-adotto_rep1.inq.gz",
+        version = "inquiSTR_version.txt"
+    output:
+        txt = "tool_comparison/benchmark_inquistr_vs_medaka_ont.tsv",
+        plot = "tool_comparison/benchmark_inquistr_vs_medaka_ont.html",
+        diff_out = "tool_comparison/benchmark_inquistr_vs_medaka_ont_discrepancies.tsv"
+    params:
+        inquiSTR = inquiSTR,
+        max_locus = MAX_LOCUS,
+        tolerance = 3
+    log:
+        "logs/benchmark_inquistr_vs_medaka_ont.log"
+    shell:
+        """
+        {params.inquiSTR} benchmark \
+            --test {input.test} \
+            --truth {input.truth} \
+            --plot {output.plot} \
+            --diff-out {output.diff_out} \
+            --tolerance {params.tolerance} \
+            --max-locus {params.max_locus} \
+            > {output.txt} 2> {log}
+        """
+
+
+rule aggregate_medaka_results:
+    """Runtime and peak memory for the three ONT callers on the full adotto catalog.
+
+    inquiSTR and LongTR timings already exist from the main tool comparison, so this only adds
+    medaka to the same table rather than re-running anything.
+    """
+    input:
+        medaka = expand("tool_comparison/ont-medaka-adotto_rep{replicate}.time", replicate=REPLICATES),
+        inquistr = expand("tool_comparison/ont-inquistr-adotto_rep{replicate}.time", replicate=REPLICATES),
+        longtr = expand("tool_comparison/ont-longtr-adotto_rep{replicate}.time", replicate=REPLICATES)
+    output:
+        "tool_comparison/medaka_results.tsv"
+    run:
+        import re
+        import pandas as pd
+
+        def parse_timing_file(filepath):
+            elapsed_time = None
+            max_memory_kb = None
+            with open(filepath, 'r') as f:
+                for line in f:
+                    if 'Elapsed (wall clock) time' in line:
+                        time_str = line.split('): ', 1)[1].strip()
+                        parts = time_str.split(':')
+                        if len(parts) == 3:
+                            h, m, s = parts
+                            elapsed_time = int(h) * 3600 + int(m) * 60 + float(s)
+                        elif len(parts) == 2:
+                            m, s = parts
+                            elapsed_time = int(m) * 60 + float(s)
+                        elif len(parts) == 1:
+                            elapsed_time = float(parts[0])
+                    elif 'Maximum resident set size' in line:
+                        max_memory_kb = int(line.split(':')[1].strip())
+            return elapsed_time, max_memory_kb
+
+        tool_names = {'medaka': 'medaka tandem', 'inquistr': 'inquiSTR', 'longtr': 'LongTR'}
+
+        def parse_metadata(filepath):
+            match = re.search(r'tool_comparison/ont-(medaka|inquistr|longtr)-adotto_rep(\d+)\.time$',
+                              filepath)
+            if not match:
+                return None, None
+            tool, replicate = match.groups()
+            return tool_names[tool], int(replicate)
+
+        results = []
+        for timing_file in input:
+            tool_name, replicate = parse_metadata(str(timing_file))
+            if tool_name is None:
+                continue
+            elapsed, memory = parse_timing_file(timing_file)
+            if elapsed is None or memory is None:
+                continue
+            results.append({
+                'technology': 'ont',
+                'tool': tool_name,
+                'replicate': replicate,
+                'elapsed_seconds': elapsed,
+                'max_memory_gb': memory / (1024 * 1024),
+            })
+
+        df = pd.DataFrame(results).sort_values(['tool', 'replicate'])
+        df.to_csv(output[0], sep='\t', index=False)
+
+
+rule medaka:
+    """Target rule for the medaka tandem comparison (ONT only)."""
+    input:
+        "tool_comparison/medaka_results.tsv",
+        "tool_comparison/medaka_benchmark_plot.html",
+        "tool_comparison/medaka_accuracy_ont.tsv",
+        "tool_comparison/benchmark_inquistr_vs_medaka_ont.tsv",
+        "medaka_version.txt"
 
 
 rule metrics_summary:
