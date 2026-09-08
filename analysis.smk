@@ -236,6 +236,13 @@ def medaka_vcf_to_inquistr(vcf_path, out_path, sample_name="medaka"):
     out_opener = gzip.open if str(out_path).endswith(".gz") else open
 
     with opener(vcf_path, "rt") as handle, out_opener(out_path, "wt") as out:
+        # The `# file_type=` line is what `inquiSTR benchmark` uses to tell an individual call
+        # file from an adotto-style truth BED. Without it the file is still usable as --test,
+        # but passing it as --truth falls through to the BED parser and fails with
+        # "Malformed BED line 1 (expected 9 fields, got 6)".
+        out.write("# file_type=individual_call\n")
+        out.write("# source=medaka tandem, converted by the inquiSTR paper workflow\n")
+        out.write(f"# sample={sample_name}\n")
         out.write("chromosome\tbegin\tend\tinfo\t{0}_H1\t{0}_H2\n".format(sample_name))
         for line in handle:
             if line.startswith("#"):
